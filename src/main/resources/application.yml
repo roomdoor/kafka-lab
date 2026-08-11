@@ -1,0 +1,35 @@
+spring:
+  application:
+    name: kafka-lab
+
+  datasource:
+    url: jdbc:postgresql://localhost:5433/kafkalab
+    username: kafkalab
+    password: kafkalab
+
+  jpa:
+    hibernate:
+      # 학습용 프로젝트라 스키마를 자동 생성한다. 운영이라면 Flyway 로 관리할 것.
+      ddl-auto: update
+    open-in-view: false
+
+  kafka:
+    bootstrap-servers: localhost:9092
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+logging:
+  level:
+    com.roomdoor.kafkalab: DEBUG
+    # 리밸런스가 언제 일어나는지 눈으로 보려면 아래를 INFO 로 둔다.
+    org.apache.kafka.clients.consumer.internals.ConsumerCoordinator: INFO
+
+app:
+  outbox:
+    # 아웃박스 릴레이 폴링 주기(ms). 짧을수록 지연이 줄지만 DB 부하가 는다.
+    poll-interval-ms: 500
+    batch-size: 100
