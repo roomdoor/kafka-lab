@@ -29,6 +29,7 @@ dependencies {
 	// Spring Boot 4 부터 자동 설정이 기술별 모듈로 쪼개졌고, KafkaAdmin(토픽 생성)과
 	// @KafkaListener 처리기(@EnableKafka)는 이 스타터에 들어 있다.
 	implementation("org.springframework.boot:spring-boot-starter-kafka")
+	implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:3.1.0")
 	implementation("org.jetbrains.kotlin:kotlin-reflect")
 	implementation("tools.jackson.module:jackson-module-kotlin")
 	runtimeOnly("org.postgresql:postgresql")

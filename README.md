@@ -30,16 +30,19 @@ docker compose up -d          # Kafka + kafka-ui + PostgreSQL
 ./gradlew bootRun
 ```
 
+- **Swagger UI: http://localhost:8080/swagger-ui/index.html** ← 여기서 바로 호출해보면 된다
 - Kafka UI: http://localhost:8081 (토픽·파티션·컨슈머 랙 확인)
-- 애플리케이션: http://localhost:8080
+- OpenAPI 문서: http://localhost:8080/v3/api-docs
 
-주문 생성:
+주문 생성 (curl 로 쏘려면):
 
 ```sh
 curl -X POST http://localhost:8080/api/orders \
   -H 'Content-Type: application/json' \
   -d '{"customerId":"c-1","amount":25000}'
 ```
+
+`customerId` 를 `FAIL` 로 주면 결제 컨슈머가 실패해 DLT 로 넘어간다. 아래 실습 4번 참고.
 
 테스트는 Testcontainers로 진짜 브로커를 띄우므로 Docker만 켜져 있으면 된다
 (`docker compose up` 은 필요 없다).
