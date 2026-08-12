@@ -21,7 +21,12 @@ class DeadLetterConsumer {
 	private val log = LoggerFactory.getLogger(javaClass)
 
 	// DLT 는 파티션이 1개라 컨슈머 스레드를 1개만 띄운다. 더 띄워봐야 놀기만 한다.
-	@KafkaListener(topics = [Topics.ORDER_CREATED_DLT], groupId = GROUP_ID, concurrency = "1")
+	// 토픽별 DLT 를 한 리스너로 모아 본다 — 실패는 어느 흐름에서 났든 사람이 봐야 하는 건 같다.
+	@KafkaListener(
+		topics = [Topics.ORDER_EVENTS_DLT, Topics.NOTIFICATION_REQUESTED_DLT],
+		groupId = GROUP_ID,
+		concurrency = "1",
+	)
 	fun consume(record: ConsumerRecord<String, String>, ack: Acknowledgment) {
 		// DeadLetterPublishingRecoverer 가 원본 정보와 예외를 헤더에 담아준다.
 		val originalTopic = record.headerAsString(KafkaHeaders.DLT_ORIGINAL_TOPIC)

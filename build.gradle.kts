@@ -21,6 +21,10 @@ repositories {
 	mavenCentral()
 }
 
+// Spring Boot BOM 은 코루틴을 1.10.2 로 고정하는데, 테스트에서 함께 쓰는 Ktor 3.5 는 1.11.0 이 필요하다.
+// 그대로 두면 mock 게이트웨이를 띄우는 순간 NoSuchMethodError 로 죽는다.
+extra["kotlin-coroutines.version"] = "1.11.0"
+
 dependencies {
 	implementation("org.springframework.boot:spring-boot-starter-webmvc")
 	implementation("org.springframework.boot:spring-boot-starter-data-jpa")
@@ -34,6 +38,9 @@ dependencies {
 	implementation("tools.jackson.module:jackson-module-kotlin")
 	runtimeOnly("org.postgresql:postgresql")
 
+	// mock 결제 게이트웨이는 별도 모듈이다. 테스트에서만 끌어다 임의 포트로 직접 띄운다.
+	// (컨테이너로 띄우면 테스트가 이미지 빌드에 묶인다.) 앱 런타임에는 Ktor 가 들어가지 않는다.
+	testImplementation(project(":mock-pg"))
 	testImplementation("org.springframework.boot:spring-boot-starter-test")
 	testImplementation("org.springframework.kafka:spring-kafka-test")
 	testImplementation("org.jetbrains.kotlin:kotlin-test-junit5")

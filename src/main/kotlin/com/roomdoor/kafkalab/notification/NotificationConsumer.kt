@@ -1,7 +1,6 @@
 package com.roomdoor.kafkalab.notification
 
 import com.roomdoor.kafkalab.config.Topics
-import com.roomdoor.kafkalab.order.OrderEvent
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.slf4j.LoggerFactory
 import org.springframework.kafka.annotation.KafkaListener
@@ -10,10 +9,15 @@ import org.springframework.stereotype.Component
 import tools.jackson.databind.json.JsonMapper
 
 /**
- * 알림 서비스 역할. PaymentConsumer 와 **같은 토픽**을 **다른 컨슈머 그룹**으로 읽는다.
+ * 알림 서비스. **전용 토픽** `notification.requested` 만 본다.
  *
- * 그룹이 다르면 오프셋도 따로 관리되므로 같은 메시지를 양쪽이 모두 받는다(fan-out).
- * 그룹이 같았다면 파티션이 나뉘어 한쪽만 받았을 것이다 — 이 차이가 Kafka 를 큐가 아닌 로그로 만드는 지점이다.
+ * 주문 이벤트를 직접 구독할 수도 있었지만 그러지 않았다.
+ * 그렇게 하면 알림 서비스가 주문 도메인의 이벤트 타입을 전부 알아야 하고,
+ * 주문 쪽에 새 이벤트가 생길 때마다 알림 쪽도 따라 고쳐야 한다.
+ * 지금은 "이 문구를 보내라" 는 요청만 받으므로 주문이 어떻게 바뀌든 영향이 없다.
+ *
+ * 파티션 키가 customerId 라, 한 고객에게 가는 알림끼리는 순서가 지켜진다.
+ * 서로 다른 고객의 알림 순서는 보장되지 않지만 그럴 필요도 없다.
  */
 @Component
 class NotificationConsumer(
@@ -22,11 +26,11 @@ class NotificationConsumer(
 
 	private val log = LoggerFactory.getLogger(javaClass)
 
-	@KafkaListener(topics = [Topics.ORDER_CREATED], groupId = GROUP_ID)
+	@KafkaListener(topics = [Topics.NOTIFICATION_REQUESTED], groupId = GROUP_ID)
 	fun consume(record: ConsumerRecord<String, String>, ack: Acknowledgment) {
-		val event = jsonMapper.readValue(record.value(), OrderEvent::class.java)
+		val event = jsonMapper.readValue(record.value(), NotificationEvent::class.java)
 
-		log.info("알림 발송: orderId=${event.orderId} customerId=${event.customerId} partition=${record.partition()} offset=${record.offset()} thread=${Thread.currentThread().name}")
+		log.info("알림 발송: customerId=${event.customerId} 내용=${event.message} partition=${record.partition()} offset=${record.offset()} thread=${Thread.currentThread().name}")
 
 		ack.acknowledge()
 	}

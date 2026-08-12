@@ -44,6 +44,28 @@ services:
       kafka:
         condition: service_healthy
 
+  # 외부 결제 게이트웨이 역할. 앱과 별개 프로세스라 이것만 죽여서 외부 장애를 재현할 수 있다.
+  #   docker compose stop mock-pg
+  mock-pg:
+    build:
+      context: .
+      dockerfile: mock-pg/Dockerfile
+    container_name: kafka-lab-mock-pg
+    ports:
+      - "9090:9090"
+    environment:
+      # 실습 기본값은 '가끔 실패'. 정상 흐름만 보고 싶으면 0 으로 두고 재기동한다.
+      MOCK_PG_FAILURE_RATE: "0.3"
+      MOCK_PG_TIMEOUT_RATE: "0.1"
+      MOCK_PG_DELAY_MS: "8000"
+      MOCK_PG_DECLINE_ABOVE: "1000000"
+    healthcheck:
+      # JRE 이미지에 curl 이 없어서 bash 의 /dev/tcp 로 포트만 확인한다.
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9090' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   postgres:
     image: postgres:17
     container_name: kafka-lab-postgres

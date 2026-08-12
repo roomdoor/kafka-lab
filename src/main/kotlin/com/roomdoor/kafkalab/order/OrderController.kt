@@ -20,11 +20,13 @@ class OrderController(
 	@Operation(
 		summary = "주문 생성",
 		description = """
-			주문을 저장하고 order.created 이벤트를 발행한다.
+			주문을 저장하고 order.events 토픽에 OrderCreated 를, notification.requested 에 알림 요청을 발행한다.
+			이후 결제 컨슈머가 외부 PG(mock-pg:9090)를 호출하고 그 결과를 다시 이벤트로 발행한다.
 
 			실습용 입력값:
-			- customerId 를 `FAIL` 로 주면 결제 컨슈머가 매번 실패한다. 3번 재시도 후 order.created.DLT 로 넘어간다.
-			- amount 를 0 이하로 주면 주문 자체가 거절된다. 주문도 이벤트도 남지 않는다(아웃박스 원자성).
+			- amount 가 1,000,000 초과 → PG 가 402 로 거절한다. 재시도 없이 PaymentFailed 로 확정되고 주문 상태가 PAYMENT_FAILED 가 된다.
+			- amount 가 0 이하 → 주문 자체가 거절된다. 주문도 이벤트도 남지 않는다(아웃박스 원자성).
+			- `docker compose stop mock-pg` 로 PG 를 죽인 뒤 주문 → 재시도 3번 후 order.events.DLT 로 넘어간다.
 		""",
 	)
 	@PostMapping

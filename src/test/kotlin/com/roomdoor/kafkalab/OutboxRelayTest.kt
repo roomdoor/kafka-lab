@@ -34,24 +34,31 @@ class OutboxRelayTest : IntegrationTestBase() {
 	private lateinit var outboxRepository: OutboxRepository
 
 	@Test
-	fun `주문을 저장하면 아웃박스에 이벤트가 함께 남고 릴레이가 Kafka 로 발행한다`() {
+	fun `주문을 저장하면 두 토픽의 이벤트가 함께 기록되고 릴레이가 발행한다`() {
 		val customerId = "customer-${UUID.randomUUID()}"
 
 		val order = orderService.createOrder(customerId, amount = 25_000)
 
-		val outboxEvent = outboxRepository.findAll().firstOrNull { it.aggregateId == order.orderId }
-		assertNotNull(outboxEvent, "주문과 같은 트랜잭션에서 아웃박스 행이 만들어져야 한다")
-		assertEquals(Topics.ORDER_CREATED, outboxEvent.topic)
+		// 주문 생명주기 토픽과 알림 토픽에 각각 한 건씩, 같은 트랜잭션에서 만들어진다.
+		val written = outboxRepository.findAll().filter {
+			it.aggregateId == order.orderId || it.aggregateId == customerId
+		}
+		assertEquals(2, written.size, "order.events 와 notification.requested 두 건이어야 한다")
+		assertEquals(
+			setOf(Topics.ORDER_EVENTS, Topics.NOTIFICATION_REQUESTED),
+			written.map { it.topic }.toSet(),
+		)
 
 		// 릴레이는 스케줄러라 즉시 실행되지 않는다. 발행 완료 표시가 채워질 때까지 기다린다.
 		await().atMost(Duration.ofSeconds(15)).untilAsserted {
-			val reloaded = outboxRepository.findById(outboxEvent.id!!).orElseThrow()
-			assertNotNull(reloaded.publishedAt, "발행에 성공하면 publishedAt 이 채워져야 한다")
+			written.forEach { event ->
+				val reloaded = outboxRepository.findById(event.id!!).orElseThrow()
+				assertNotNull(reloaded.publishedAt, "발행에 성공하면 publishedAt 이 채워져야 한다")
+			}
 		}
 
-		val published = consumeMatching(Topics.ORDER_CREATED, expectedCount = 1) {
-			it.key() == order.orderId
-		}.firstOrNull()
+		val published = consumeMatching(Topics.ORDER_EVENTS, expectedCount = 1) { it.key() == order.orderId }
+			.firstOrNull()
 		assertNotNull(published, "아웃박스에 남은 이벤트가 Kafka 로 나가야 한다")
 		assertTrue(published.value().contains(customerId))
 	}

@@ -14,9 +14,16 @@ import org.springframework.kafka.config.TopicBuilder
 class KafkaTopicConfig {
 
 	@Bean
-	fun orderCreatedTopic(): NewTopic =
-		TopicBuilder.name(Topics.ORDER_CREATED)
-			.partitions(Topics.ORDER_PARTITIONS)
+	fun orderEventsTopic(): NewTopic =
+		TopicBuilder.name(Topics.ORDER_EVENTS)
+			.partitions(Topics.PARTITIONS)
+			.replicas(1)
+			.build()
+
+	@Bean
+	fun notificationRequestedTopic(): NewTopic =
+		TopicBuilder.name(Topics.NOTIFICATION_REQUESTED)
+			.partitions(Topics.PARTITIONS)
 			.replicas(1)
 			.build()
 
@@ -25,9 +32,10 @@ class KafkaTopicConfig {
 	 * 실무에서는 보존 기간을 본 토픽보다 길게 잡는 경우가 많다(조사할 시간이 필요하므로).
 	 */
 	@Bean
-	fun orderCreatedDltTopic(): NewTopic =
-		TopicBuilder.name(Topics.ORDER_CREATED_DLT)
-			.partitions(1)
-			.replicas(1)
-			.build()
+	fun orderEventsDltTopic(): NewTopic =
+		TopicBuilder.name(Topics.ORDER_EVENTS_DLT).partitions(1).replicas(1).build()
+
+	@Bean
+	fun notificationRequestedDltTopic(): NewTopic =
+		TopicBuilder.name(Topics.NOTIFICATION_REQUESTED_DLT).partitions(1).replicas(1).build()
 }

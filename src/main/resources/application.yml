@@ -33,3 +33,11 @@ app:
     # 아웃박스 릴레이 폴링 주기(ms). 짧을수록 지연이 줄지만 DB 부하가 는다.
     poll-interval-ms: 500
     batch-size: 100
+
+  payment-gateway:
+    # docker compose 의 mock-pg 컨테이너
+    base-url: http://localhost:9090
+    connect-timeout-ms: 2000
+    # mock 이 지연 응답으로 8초를 끌면 여기서 끊긴다 → 재시도 대상 실패가 된다.
+    # 이 값이 없으면 응답 없는 서버 하나가 컨슈머 스레드를 영원히 붙잡는다.
+    read-timeout-ms: 3000

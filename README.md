@@ -2,10 +2,56 @@
 
 Kafka를 실무에서 쓸 때 실제로 마주치는 문제들을 하나씩 재현하고 검증하는 학습용 프로젝트.
 
-주문(order) → 결제(payment) / 알림(notification) 흐름을 최소한으로 만들고, 그 위에서
-파티션·컨슈머 그룹·오프셋 커밋·재시도·DLT·트랜잭셔널 아웃박스를 확인한다.
+주문 → 결제 → 알림 흐름을 만들고, 그 위에서 파티션·컨슈머 그룹·오프셋 커밋·재시도·DLT·
+트랜잭셔널 아웃박스·멱등성을 확인한다. 결제는 **진짜 외부 HTTP 호출**이고, 그 상대인 mock 게이트웨이는
+별도 컨테이너로 떠 있어서 죽여볼 수 있다.
 
-**Kotlin 2.2 / Spring Boot 4.0 / Kafka 4.3 (KRaft) / PostgreSQL 17 / Testcontainers**
+**Kotlin 2.2 / Spring Boot 4.0 / Kafka 4.3 (KRaft) / PostgreSQL 17 / Ktor 3.5 / Testcontainers**
+
+---
+
+## 전체 흐름
+
+```
+POST /api/orders
+      │
+      ▼
+ OrderService  ┌ @Transactional ─────────────────────────┐
+      │        │ orders INSERT (status=CREATED)          │
+      │        │ outbox INSERT → order.events            │
+      │        │ outbox INSERT → notification.requested  │
+      │        └─────────────────────────────────────────┘
+      ▼
+ OutboxRelay (500ms 폴링)
+      │
+      ├────────────────────────────────┐
+      ▼                                ▼
+┌────────────────────────┐   ┌──────────────────────────┐
+│ order.events (파티션 3) │   │ notification.requested   │
+│ key = orderId          │   │ key = customerId (파티션 3)│
+│  OrderCreated          │   └──────────────────────────┘
+│  PaymentCompleted      │              │
+│  PaymentFailed         │              ▼
+└────────────────────────┘      NotificationConsumer
+   │              │              group=notification-service
+   │ group=       │ group=
+   │ payment-     │ order-status-
+   │ service      │ service
+   ▼              ▼
+PaymentConsumer   OrderStatusProjector
+   │               (orders.status 갱신)
+   │  ① 관심 없는 이벤트 걸러내기
+   │  ② 멱등 검사 (processed_events)
+   │  ③ 외부 PG 호출 ──HTTP──▶ mock-pg 컨테이너 (:9090)
+   │  ④ @Transactional {
+   │       payments + processed_events + outbox 2건
+   │     }
+   ▼
+ 실패 시 → 0.5s → 1s → 2s 재시도 → order.events.DLT
+```
+
+**컨슈머가 다시 프로듀서가 된다.** 결제 컨슈머는 결과를 아웃박스에 적고, 같은 릴레이가 발행한다.
+발행 경로는 끝까지 하나뿐이다.
 
 ---
 
@@ -13,39 +59,59 @@ Kafka를 실무에서 쓸 때 실제로 마주치는 문제들을 하나씩 재�
 
 | 주제 | 어디서 볼 수 있나 |
 |---|---|
-| 파티션 키와 순서 보장 | `OrderService`, `PartitionKeyOrderingTest` |
-| 컨슈머 그룹 fan-out | `PaymentConsumer`, `NotificationConsumer` |
+| 파티션 키와 순서 보장 | `OrderService`, `PartitionKeyOrderingTest`, `OrderEventChainTest` |
+| 한 토픽에 여러 이벤트 타입 vs 토픽 분리 | `Topics` 주석, `PaymentConsumer` 의 타입 필터 |
+| 컨슈머 그룹 fan-out | `PaymentConsumer` ↔ `OrderStatusProjector` (같은 토픽, 다른 그룹) |
 | 수동 오프셋 커밋 | `KafkaConsumerConfig`, 각 컨슈머의 `ack.acknowledge()` |
-| 재시도 + 지수 백오프 + DLT | `KafkaConsumerConfig`, `DeadLetterTest` |
+| 재시도 + 지수 백오프 + DLT | `KafkaConsumerConfig`, `PaymentFailureTest` |
+| **재시도 가능 실패 vs 불가능 실패** | `PaymentGatewayClient` |
 | 멱등 프로듀서 / `acks=all` | `KafkaProducerConfig` |
-| 중복 수신 방어(멱등 컨슈머) | `PaymentConsumer` |
-| 트랜잭셔널 아웃박스 | `OrderService`, `OutboxRelay`, `OutboxRelayTest` |
+| **DB 기반 멱등 컨슈머** | `ProcessedEvent`, `PaymentIdempotencyTest` |
+| **외부 API 멱등키** | `PaymentGatewayClient`, `MockPaymentGateway` |
+| 트랜잭셔널 아웃박스 | `OrderService`, `PaymentService`, `OutboxRelay` |
+| 자연 멱등이라 중복 검사가 필요 없는 경우 | `OrderStatusProjector` 주석 |
 
 ---
 
 ## 실행
 
 ```sh
-docker compose up -d          # Kafka + kafka-ui + PostgreSQL
+docker compose up -d --build        # Kafka + kafka-ui + PostgreSQL + mock-pg
 ./gradlew bootRun
 ```
 
-- **Swagger UI: http://localhost:8080/swagger-ui/index.html** ← 여기서 바로 호출해보면 된다
-- Kafka UI: http://localhost:8081 (토픽·파티션·컨슈머 랙 확인)
-- OpenAPI 문서: http://localhost:8080/v3/api-docs
+첫 `--build` 는 mock-pg 이미지를 만드느라 몇 분 걸린다. 이후에는 `docker compose up -d` 로 충분하다.
 
-주문 생성 (curl 로 쏘려면):
+- **Swagger UI: http://localhost:8080/swagger-ui/index.html** ← 여기서 바로 호출
+- Kafka UI: http://localhost:8081 (토픽·파티션·컨슈머 랙)
+- mock 결제 게이트웨이: http://localhost:9090
 
 ```sh
+# 정상 결제
 curl -X POST http://localhost:8080/api/orders \
-  -H 'Content-Type: application/json' \
-  -d '{"customerId":"c-1","amount":25000}'
+  -H 'Content-Type: application/json' -d '{"customerId":"c-1","amount":25000}'
+
+# 한도 초과 → PG 가 402 로 거절 (재시도 없이 실패 확정)
+curl -X POST http://localhost:8080/api/orders \
+  -H 'Content-Type: application/json' -d '{"customerId":"c-1","amount":2000000}'
 ```
 
-`customerId` 를 `FAIL` 로 주면 결제 컨슈머가 실패해 DLT 로 넘어간다. 아래 실습 4번 참고.
+기본 설정은 **30% 확률로 500, 10% 확률로 8초 지연**이다. 정상 흐름만 보려면 실패율을 끈다.
 
-테스트는 Testcontainers로 진짜 브로커를 띄우므로 Docker만 켜져 있으면 된다
-(`docker compose up` 은 필요 없다).
+```sh
+curl -X POST http://localhost:9090/_config -H 'Content-Type: application/json' \
+  -d '{"failureRate":0,"timeoutRate":0,"delayMillis":8000,"declineAbove":1000000}'
+```
+
+mock 코드를 고치는 중이라면 이미지 재빌드 없이 직접 띄우는 편이 빠르다.
+
+```sh
+docker compose stop mock-pg
+./gradlew :mock-pg:run
+```
+
+테스트는 Testcontainers가 Kafka/PostgreSQL을 띄우고 mock 게이트웨이는 JVM 안에서 직접 뜬다.
+Docker만 켜져 있으면 `docker compose up` 없이도 돌아간다.
 
 ```sh
 ./gradlew test
@@ -55,108 +121,152 @@ curl -X POST http://localhost:8080/api/orders \
 
 ## 실습 시나리오
 
-각 항목은 "무엇을 확인하는가"를 먼저 읽고, 직접 돌려서 눈으로 확인하는 순서를 권한다.
+### 1. 이벤트 체인과 순서 보장
 
-### 1. 파티션 키가 순서를 결정한다
-
-같은 `customerId`로 주문을 여러 번 만들어도 파티션은 제각각이다. 파티션 키는 `orderId`이기 때문이다.
-Kafka UI의 Messages 탭에서 각 메시지의 partition 값을 보면 된다.
-
-**확인할 것**: 순서 보장은 토픽이 아니라 **파티션 단위**다. 순서가 필요한 이벤트는 같은 키로 묶어야 한다.
-(`PartitionKeyOrderingTest`)
-
-### 2. 컨슈머 그룹이 다르면 같은 메시지를 양쪽이 받는다
-
-`payment-service`와 `notification-service`는 같은 토픽을 읽지만 그룹이 다르다.
-주문을 하나 만들면 두 컨슈머 로그가 모두 찍힌다.
-
-**확인할 것**: 그룹이 같으면 파티션이 나뉘어 한쪽만 받고(작업 큐), 다르면 양쪽 다 받는다(fan-out).
-
-### 3. 컨슈머를 늘리면 어디까지 빨라지나
-
-`KafkaConsumerConfig`의 `setConcurrency` 값을 4, 5로 올려 재기동한 뒤 로그의 thread 이름을 본다.
-
-**확인할 것**: 파티션이 3개면 컨슈머 스레드를 4개 띄워도 하나는 파티션을 못 받아 논다.
-병렬도의 상한은 파티션 수다.
-
-### 4. 실패한 메시지는 DLT로 빠진다
+주문을 하나 넣고 로그를 본다. 이벤트 하나가 결제를 부르고, 결제 결과가 다시 이벤트가 되어
+상태 갱신과 알림을 부른다.
 
 ```sh
-# customerId 를 FAIL 로 주면 결제 컨슈머가 매번 예외를 던진다
-curl -X POST http://localhost:8080/api/orders \
-  -H 'Content-Type: application/json' \
-  -d '{"customerId":"FAIL","amount":25000}'
+docker exec kafka-lab-broker /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic order.events --from-beginning \
+  --property print.partition=true --property print.key=true
 ```
 
-0.5초 → 1초 → 2초 간격으로 3번 재시도한 뒤 `order.created.DLT` 로 넘어간다.
-Kafka UI에서 DLT 토픽을 열면 원본 토픽·파티션·예외 메시지가 헤더에 남아 있다.
+**확인할 것**: 같은 `orderId` 의 `ORDER_CREATED` 와 `PAYMENT_COMPLETED` 가 **같은 파티션에 이 순서로** 있다.
+파티션 키를 `orderId` 로 잡았기 때문이다. 순서가 뒤집히면 `OrderStatusProjector` 가
+존재하지 않는 주문을 갱신하려 든다. (`OrderEventChainTest`)
 
-**확인할 것**: 이 장치가 없으면 실패한 메시지 하나가 무한 재시도를 돌며
-**같은 파티션 뒤에 쌓인 정상 메시지까지 전부 멈춘다**(poison pill).
-`DefaultErrorHandler` 설정을 잠시 지우고 돌려보면 그 상황을 그대로 볼 수 있다.
+### 2. 같은 토픽, 다른 그룹 — fan-out
 
-### 5. 아웃박스가 없으면 무엇이 깨지나
+`PaymentConsumer` 와 `OrderStatusProjector` 는 `order.events` 를 각자 읽는다.
 
-`OrderService`는 주문과 이벤트를 **같은 DB 트랜잭션**에 쓰고, 발행은 `OutboxRelay`가 맡는다.
+```sh
+docker exec kafka-lab-broker /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 --describe --group payment-service
+docker exec kafka-lab-broker /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 --describe --group order-status-service
+```
 
-직접 비교해보려면 `OrderService`에서 `kafkaTemplate.send()`를 바로 호출하도록 바꾼 뒤,
-전송 직후 예외를 던져 트랜잭션을 롤백시켜 본다.
+**확인할 것**: 두 그룹의 `CURRENT-OFFSET` 이 따로 논다. 그룹이 같았다면 파티션이 나뉘어
+한쪽만 받았을 것이다. `groupId` 는 라우팅이 아니라 **오프셋 장부의 이름**이다.
 
-**확인할 것**: 주문은 DB에 없는데 "주문 생성" 이벤트만 흘러나간 상태가 만들어진다.
-DB 트랜잭션과 메시지 전송은 함께 커밋되지 않는다 — 아웃박스는 이 간극을 메우는 패턴이다.
-(`OutboxRelayTest`)
+### 3. 외부 서버가 죽으면 — 재시도 후 DLT
 
-### 6. 중복은 반드시 온다
+```sh
+docker compose stop mock-pg
+curl -X POST http://localhost:8080/api/orders \
+  -H 'Content-Type: application/json' -d '{"customerId":"c-outage","amount":30000}'
+```
 
-`OutboxRelay`는 at-least-once다. 전송에 성공하고 `publishedAt`을 기록하기 전에 죽으면 같은 이벤트를 다시 보낸다.
+**확인할 것**: 0.5초 → 1초 → 2초 간격으로 3번 재시도한 뒤 `order.events.DLT` 로 넘어간다.
+주문 상태는 `CREATED` 그대로고 `payments` 에는 아무것도 남지 않는다 — **결제 실패로 확정하지 않는다.**
+장애는 결과가 아니기 때문이다. 나중에 사람이 DLT 를 보고 재처리한다.
 
-**확인할 것**: `PaymentConsumer`의 `processedEventIds` 검사를 지우고 릴레이를 강제 중복 실행시키면
-결제가 두 번 처리된다. Kafka에서 "정확히 한 번"은 컨슈머가 멱등하게 만들어 얻는 것이지 브로커가 주는 게 아니다.
+```sh
+docker compose start mock-pg    # 되살리면 이후 주문은 정상 처리된다
+```
 
-### 7. 컨슈머를 죽여 리밸런싱 보기
+### 4. 거절은 재시도하지 않는다
 
-애플리케이션을 두 개 띄우고(`--server.port=8082`) 한쪽을 강제 종료한다.
+```sh
+curl -X POST http://localhost:8080/api/orders \
+  -H 'Content-Type: application/json' -d '{"customerId":"c-1","amount":2000000}'
+```
 
-**확인할 것**: 남은 쪽이 죽은 인스턴스의 파티션을 넘겨받는다.
-그 사이 처리 중이던 메시지는 커밋되지 않았으므로 다시 소비된다 — 6번의 중복이 실제로 발생하는 지점이다.
+**확인할 것**: 재시도 로그가 없고 DLT 로도 가지 않는다. `payments.status = FAILED`,
+`orders.status = PAYMENT_FAILED` 로 즉시 확정된다.
+
+이 구분이 이 프로젝트에서 가장 중요한 부분이다. 거절을 예외로 던지면 재시도 3번을 낭비하고
+DLT 를 오염시킨다. 반대로 일시 장애를 확정 실패로 처리하면 멀쩡한 주문이 결제 실패로 굳는다.
+`PaymentGatewayClient` 가 그 갈림길이다.
+
+### 5. 중복은 반드시 온다
+
+같은 이벤트를 두 번 흘려보낸다.
+
+```sh
+docker exec kafka-lab-broker /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 --group payment-service \
+  --topic order.events --reset-offsets --to-earliest --execute
+```
+
+(먼저 앱을 내려야 한다. 오프셋 되감기는 그룹에 활성 컨슈머가 없을 때만 된다.)
+
+**확인할 것**: 과거 이벤트가 전부 다시 흘러들어오지만 `payments` 는 늘지 않는다.
+`processed_events` 테이블이 막는다. 예전에는 이 기록이 메모리에 있어서 재시작하면 사라졌다.
+
+```sql
+select consumer_group, count(*) from processed_events group by 1;
+```
+
+### 6. 타임아웃 — 결제됐는지 모르는 상태
+
+지연 확률을 100%로 올린다.
+
+```sh
+curl -X POST http://localhost:9090/_config -H 'Content-Type: application/json' \
+  -d '{"failureRate":0,"timeoutRate":1,"delayMillis":8000,"declineAbove":1000000}'
+```
+
+**확인할 것**: 호출 측은 3초에 끊지만 **게이트웨이 쪽에서는 결제가 진행된다.**
+재시도할 때 같은 `Idempotency-Key`(= eventId) 를 보내기 때문에 게이트웨이가 처음 결과를 그대로 돌려주고,
+이중 결제가 나지 않는다. `PaymentGatewayClient` 에서 헤더를 빼고 돌려보면 차이가 보인다.
+
+### 7. 컨슈머를 늘리면 어디까지 빨라지나
+
+`KafkaConsumerConfig` 의 `setConcurrency` 를 5로 올려 재기동하고 로그의 thread 이름을 본다.
+
+**확인할 것**: 파티션이 3개면 스레드를 5개 띄워도 2개는 파티션을 못 받아 논다.
+병렬도의 상한은 파티션 수다.
 
 ### 8. 파티션은 늘릴 수만 있다
 
 ```sh
 docker exec kafka-lab-broker /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server localhost:9092 --alter --topic order.created --partitions 6
+  --bootstrap-server localhost:9092 --alter --topic order.events --partitions 6
 ```
 
-줄이는 명령은 실패한다.
+줄이는 명령은 실패한다. 늘리면 키-파티션 매핑이 바뀌어 **기존 키의 순서 보장이 그 시점에 끊긴다.**
 
-**확인할 것**: 파티션을 늘리면 키-파티션 매핑이 바뀌어, **기존 키의 순서 보장이 그 시점에 끊긴다**.
-운영에서 파티션 증설을 함부로 못 하는 이유다.
+### 9. DLT 는 순서를 깬다
+
+`PaymentConsumer` 에서 예외를 던지도록 잠깐 고쳐두고 같은 주문에 이벤트를 두 건 흘려보면,
+앞 이벤트는 DLT 로 빠지고 뒤 이벤트는 정상 처리된다.
+
+**확인할 것**: DLT 는 막힌 파티션을 뚫는 장치지 공짜가 아니다. 재고·잔액처럼 앞 이벤트가 만든 상태 위에
+뒤 이벤트가 얹히는 도메인이라면, DLT 대신 그 파티션을 멈추는 선택을 해야 할 수도 있다.
 
 ---
 
-## 유용한 명령
+## 모듈 구성
 
-```sh
-# 토픽 목록 / 상세
-docker exec kafka-lab-broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
-docker exec kafka-lab-broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic order.created
-
-# 컨슈머 그룹 상태와 랙 (LAG 이 쌓이면 컨슈머가 못 따라가고 있다는 뜻)
-docker exec kafka-lab-broker /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group payment-service
-
-# 메시지 직접 확인
-docker exec kafka-lab-broker /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 --topic order.created.DLT --from-beginning
 ```
+kafka-lab/
+├── src/main/kotlin/com/roomdoor/kafkalab/
+│   ├── config/        토픽·프로듀서·컨슈머 설정
+│   ├── order/         주문 도메인, 이벤트 모델, 상태 프로젝터
+│   ├── payment/       결제 컨슈머, PG 클라이언트, 트랜잭션 경계
+│   ├── notification/  알림 컨슈머
+│   ├── idempotency/   처리 이력 테이블
+│   ├── outbox/        아웃박스 엔티티·릴레이
+│   └── dlt/           DLT 감시
+└── mock-pg/           별도 모듈. Ktor 로 만든 가짜 결제 게이트웨이 (Docker 이미지)
+```
+
+mock-pg 는 앱과 **의존성이 분리**돼 있다. Ktor 는 앱 런타임 클래스패스에 들어가지 않고,
+테스트에서만 `testImplementation(project(":mock-pg"))` 로 끌어다 쓴다.
 
 ---
 
 ## 의도적으로 넣지 않은 것
 
+- **배송 체인** — 결제까지로 범위를 끊었다. 개념이 반복될 뿐이라 우선순위가 낮다.
 - **Kafka Streams / ksqlDB** — 집계·윈도우 처리는 별도 주제라 범위를 흐린다.
-- **Schema Registry / Avro** — 운영에서는 필요하지만, 여기서는 JSON 문자열로 두고
-  스키마 호환성 문제 자체는 `OrderEvent` 주석으로만 다뤘다.
-- **Kafka 트랜잭션(exactly-once semantics)** — 아웃박스 + 멱등 컨슈머로 같은 목적을 달성했다.
+- **Schema Registry / Avro** — JSON 문자열로 두고, 스키마 호환성 문제는 `OrderEvent` 주석으로만 다뤘다.
+- **Kafka 트랜잭션(exactly-once)** — 아웃박스 + 멱등 컨슈머로 같은 목적을 달성했다.
   Kafka 트랜잭션은 "Kafka에서 읽어 Kafka로 쓰는" 경로에서 값어치가 크고, DB가 끼면 어차피 아웃박스가 필요하다.
-- **멀티 브로커 구성** — 복제·ISR·리더 선출을 보려면 브로커 3대가 필요하다.
-  단일 브로커에서는 `acks=all`도 사실상 `acks=1`과 같다는 점만 알고 있으면 된다.
+- **보상 트랜잭션 / Saga** — 결제 실패는 주문 상태 변경까지만 표현한다.
+- **재조회(reconciliation) 배치** — 타임아웃 후 결과 불명 상태는 멱등키로만 다룬다.
+  실무에서는 PG 와 주기적으로 대사하는 배치가 반드시 있다. `payments.pg_transaction_id` 가 그 연결고리다.
+- **멀티 브로커** — 복제·ISR·리더 선출을 보려면 브로커 3대가 필요하다.
+  단일 브로커에서는 `acks=all` 도 사실상 `acks=1` 과 같다는 점만 알아두면 된다.

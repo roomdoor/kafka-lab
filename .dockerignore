@@ -1,0 +1,7 @@
+.git/
+.gradle/
+.claude/
+.idea/
+build/
+mock-pg/build/
+*.iml

@@ -1,0 +1,15 @@
+<configuration>
+	<appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+		<encoder>
+			<pattern>%d{HH:mm:ss.SSS} %-5level %logger{20} - %msg%n</pattern>
+		</encoder>
+	</appender>
+
+	<!-- Netty 가 DEBUG 로 쏟아내면 mock 자신의 로그가 묻힌다. -->
+	<logger name="io.netty" level="WARN"/>
+	<logger name="io.ktor" level="INFO"/>
+
+	<root level="INFO">
+		<appender-ref ref="STDOUT"/>
+	</root>
+</configuration>

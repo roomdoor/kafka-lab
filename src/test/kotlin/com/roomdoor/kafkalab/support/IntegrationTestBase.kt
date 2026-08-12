@@ -1,5 +1,7 @@
 package com.roomdoor.kafkalab.support
 
+import com.roomdoor.mockpg.MockPgConfig
+import com.roomdoor.mockpg.startMockPaymentGateway
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.clients.consumer.KafkaConsumer
@@ -14,14 +16,20 @@ import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.kafka.KafkaContainer
 import org.testcontainers.postgresql.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
+import tools.jackson.databind.json.JsonMapper
+import java.net.ServerSocket
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
 import java.time.Duration
 import java.util.UUID
 
 /**
- * 실제 Kafka 브로커와 PostgreSQL 을 컨테이너로 띄우고 테스트한다.
+ * 실제 Kafka 브로커와 PostgreSQL 을 컨테이너로 띄우고, mock 결제 게이트웨이는 **같은 JVM 안에서** 임의 포트로 띄운다.
  *
- * EmbeddedKafka 로도 되지만, 리스너 설정·리밸런스·DLT 처럼 이 프로젝트에서 확인하려는 동작은
- * 진짜 브로커에서 검증해야 의미가 있다. 컨테이너는 클래스 간에 재사용되어 한 번만 뜬다.
+ * mock 을 컨테이너로 올리면 테스트가 이미지 빌드에 묶인다. 클래스로 직접 띄우면 즉시 뜨고,
+ * 시나리오마다 실패율을 바꿔가며 쓸 수 있다.
  */
 @SpringBootTest
 @Testcontainers
@@ -30,11 +38,30 @@ abstract class IntegrationTestBase {
 	@Autowired
 	protected lateinit var kafkaTemplate: KafkaTemplate<String, String>
 
+	@Autowired
+	protected lateinit var jsonMapper: JsonMapper
+
 	@BeforeEach
-	fun waitForListeners() {
-		// 컨슈머가 파티션을 배정받기 전에 발행하면 auto.offset.reset=earliest 라도
-		// 테스트가 먼저 끝나버릴 수 있다. 컨테이너 기동 직후 한 번만 여유를 준다.
+	fun resetEnvironment() {
+		// 앞선 테스트가 바꿔둔 실패율이 남아 다음 테스트를 오염시키지 않게 매번 되돌린다.
+		configureMockPg(MockPgConfig())
+		// 컨슈머가 파티션을 배정받기 전에 발행하면 테스트가 먼저 끝나버릴 수 있다.
 		Thread.sleep(200)
+	}
+
+	/** mock 게이트웨이 동작을 런타임에 바꾼다. 실제 PG 에는 없는 실습용 엔드포인트다. */
+	protected fun configureMockPg(config: MockPgConfig) {
+		val body = """
+			{"failureRate":${config.failureRate},"timeoutRate":${config.timeoutRate},
+			 "delayMillis":${config.delayMillis},"declineAbove":${config.declineAbove}}
+		""".trimIndent()
+
+		val request = HttpRequest.newBuilder(URI.create("http://localhost:$mockPgPort/_config"))
+			.header("Content-Type", "application/json")
+			.POST(HttpRequest.BodyPublishers.ofString(body))
+			.build()
+
+		HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.discarding())
 	}
 
 	/**
@@ -77,9 +104,14 @@ abstract class IntegrationTestBase {
 		@JvmStatic
 		val postgres: PostgreSQLContainer = PostgreSQLContainer(DockerImageName.parse("postgres:17"))
 
+		@JvmStatic
+		val mockPgPort: Int = ServerSocket(0).use { it.localPort }
+
 		init {
 			kafka.start()
 			postgres.start()
+			// 기본값은 '항상 성공'. 실패 시나리오는 각 테스트가 /_config 로 바꿔 쓴다.
+			startMockPaymentGateway(mockPgPort, MockPgConfig()).start(wait = false)
 		}
 
 		@JvmStatic
@@ -90,6 +122,7 @@ abstract class IntegrationTestBase {
 			registry.add("spring.datasource.username") { postgres.username }
 			registry.add("spring.datasource.password") { postgres.password }
 			registry.add("spring.jpa.hibernate.ddl-auto") { "create-drop" }
+			registry.add("app.payment-gateway.base-url") { "http://localhost:$mockPgPort" }
 		}
 	}
 }

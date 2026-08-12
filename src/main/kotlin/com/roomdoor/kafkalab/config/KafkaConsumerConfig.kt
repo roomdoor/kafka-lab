@@ -54,7 +54,7 @@ class KafkaConsumerConfig {
 		factory.setConsumerFactory(consumerFactory)
 
 		// 컨슈머 스레드 수. 파티션 수보다 크게 잡아도 남는 스레드는 파티션을 못 받아 논다.
-		factory.setConcurrency(Topics.ORDER_PARTITIONS)
+		factory.setConcurrency(Topics.PARTITIONS)
 
 		// 리스너가 ack.acknowledge() 를 호출해야 오프셋이 커밋된다. 처리 성공 후에만 커밋하기 위함.
 		factory.containerProperties.ackMode = ContainerProperties.AckMode.MANUAL_IMMEDIATE
@@ -70,9 +70,10 @@ class KafkaConsumerConfig {
 	private fun deadLetterErrorHandler(kafkaTemplate: KafkaTemplate<String, String>): DefaultErrorHandler {
 		val recoverer = DeadLetterPublishingRecoverer(kafkaTemplate) { record, exception ->
 			log.error("DLT 로 보냄: topic=${record.topic()} partition=${record.partition()} offset=${record.offset()} 원인=${exception.message}")
+			// 토픽마다 자기 DLT 로 보낸다. 하나로 합치면 어느 흐름에서 터졌는지 헤더를 까봐야 안다.
 			// 파티션을 -1 로 넘겨 브로커가 고르게 한다.
 			// 기본 동작은 '원본과 같은 파티션 번호' 인데, DLT 는 파티션이 1개라 2번 파티션에서 온 메시지는 전송이 실패한다.
-			TopicPartition(Topics.ORDER_CREATED_DLT, -1)
+			TopicPartition("${record.topic()}.DLT", -1)
 		}
 
 		// 0.5초 → 1초 → 2초 로 벌어지며 최대 3번 재시도. 실패가 몰릴 때 브로커와 하위 시스템을 함께 두들기지 않으려는 것.
