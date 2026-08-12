@@ -29,10 +29,7 @@ class DeadLetterConsumer {
 		val originalPartition = record.headerAsInt(KafkaHeaders.DLT_ORIGINAL_PARTITION)
 		val exceptionMessage = record.headerAsString(KafkaHeaders.DLT_EXCEPTION_MESSAGE)
 
-		log.error(
-			"처리 실패 이벤트 도착: originalTopic=$originalTopic originalPartition=$originalPartition " +
-				"원인=$exceptionMessage payload=${record.value()}"
-		)
+		log.error("처리 실패 이벤트 도착: originalTopic=$originalTopic originalPartition=$originalPartition 원인=$exceptionMessage payload=${record.value()}")
 
 		ack.acknowledge()
 	}

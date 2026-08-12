@@ -26,10 +26,7 @@ class NotificationConsumer(
 	fun consume(record: ConsumerRecord<String, String>, ack: Acknowledgment) {
 		val event = jsonMapper.readValue(record.value(), OrderEvent::class.java)
 
-		log.info(
-			"알림 발송: orderId=${event.orderId} customerId=${event.customerId} " +
-				"partition=${record.partition()} offset=${record.offset()} thread=${Thread.currentThread().name}"
-		)
+		log.info("알림 발송: orderId=${event.orderId} customerId=${event.customerId} partition=${record.partition()} offset=${record.offset()} thread=${Thread.currentThread().name}")
 
 		ack.acknowledge()
 	}

@@ -46,10 +46,7 @@ class PaymentConsumer(
 		require(event.amount > 0) { "결제 금액이 잘못됨: ${event.amount}" }
 		check(event.customerId != "FAIL") { "결제 게이트웨이 응답 없음: orderId=${event.orderId}" }
 
-		log.info(
-			"결제 처리: orderId=${event.orderId} amount=${event.amount} " +
-				"partition=${record.partition()} offset=${record.offset()}"
-		)
+		log.info("결제 처리: orderId=${event.orderId} amount=${event.amount} partition=${record.partition()} offset=${record.offset()}")
 
 		// 처리에 성공한 뒤에 기록한다. 이 줄이 위쪽에 있으면 재시도 때 자기 자신을 '중복' 으로 오인해
 		// 실패한 메시지가 조용히 성공 처리되고 DLT 로도 가지 않는다.

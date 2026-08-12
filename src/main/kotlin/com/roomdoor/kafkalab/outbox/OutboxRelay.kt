@@ -36,10 +36,7 @@ class OutboxRelay(
 				// get() 으로 브로커 응답을 기다린다. 기다리지 않으면 실패한 전송까지 발행 성공으로 기록된다.
 				val result = kafkaTemplate.send(event.topic, event.aggregateId, event.payload).get()
 				event.publishedAt = Instant.now()
-				log.debug(
-					"발행 완료: id=${event.id} key=${event.aggregateId} " +
-						"partition=${result.recordMetadata.partition()} offset=${result.recordMetadata.offset()}"
-				)
+				log.debug("발행 완료: id=${event.id} key=${event.aggregateId} partition=${result.recordMetadata.partition()} offset=${result.recordMetadata.offset()}")
 			} catch (e: Exception) {
 				// 한 건이 막히면 뒤의 이벤트도 보내지 않고 멈춘다. 순서를 지키기 위해서다.
 				// 여기서 계속 진행하면 같은 주문의 두 번째 이벤트가 첫 번째보다 먼저 도착할 수 있다.
