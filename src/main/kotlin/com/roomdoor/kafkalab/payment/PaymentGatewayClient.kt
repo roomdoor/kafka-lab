@@ -7,6 +7,7 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory
 import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
 import org.springframework.web.client.ResourceAccessException
+import org.springframework.web.client.toEntity
 import java.time.Duration
 
 /** 재시도하면 결과가 달라질 수 있는 실패. 이 예외만 Kafka 재시도로 넘긴다. */
@@ -72,7 +73,7 @@ class PaymentGatewayClient(
 				.retrieve()
 				// 기본 동작은 4xx/5xx 에서 예외를 던지는 것이다. 상태 코드별로 직접 분류하려고 꺼둔다.
 				.onStatus({ true }) { _, _ -> }
-				.toEntity(GatewayResponse::class.java)
+				.toEntity<GatewayResponse>()
 		} catch (e: ResourceAccessException) {
 			// 커넥션 거부, 읽기 타임아웃 등. 결제가 됐는지 안 됐는지 알 수 없는 상태다.
 			throw PaymentGatewayException("게이트웨이 통신 실패: orderId=$orderId", e)

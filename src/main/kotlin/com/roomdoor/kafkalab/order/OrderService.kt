@@ -29,9 +29,7 @@ class OrderService(
 	fun createOrder(customerId: String, amount: Long): Order {
 		require(amount > 0) { "주문 금액은 0보다 커야 한다: $amount" }
 
-		val order = orderRepository.save(
-			Order(orderId = UUID.randomUUID().toString(), customerId = customerId, amount = amount)
-		)
+		val order = orderRepository.save(Order(orderId = UUID.randomUUID().toString(), customerId = customerId, amount = amount))
 
 		outboxWriter.write(
 			topic = Topics.ORDER_EVENTS,
