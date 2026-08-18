@@ -64,6 +64,7 @@ PaymentConsumer   OrderStatusProjector
 | 컨슈머 그룹 fan-out | `PaymentConsumer` ↔ `OrderStatusProjector` (같은 토픽, 다른 그룹) |
 | 수동 오프셋 커밋 | `KafkaConsumerConfig`, 각 컨슈머의 `ack.acknowledge()` |
 | 재시도 + 지수 백오프 + DLT | `KafkaConsumerConfig`, `PaymentFailureTest` |
+| **실패 이력 기록과 재처리** | `FailedEvent`, `DeadLetterConsumer` |
 | **재시도 가능 실패 vs 불가능 실패** | `PaymentGatewayClient` |
 | 멱등 프로듀서 / `acks=all` | `KafkaProducerConfig` |
 | **DB 기반 멱등 컨슈머** | `ProcessedEvent`, `PaymentIdempotencyTest` |
@@ -166,6 +167,53 @@ curl -X POST http://localhost:8080/api/orders \
 docker compose start mock-pg    # 되살리면 이후 주문은 정상 처리된다
 ```
 
+**실패는 `failed_events` 테이블에 기록된다.** DLT 토픽만으로는 조사가 안 되기 때문이다 —
+보존 기간이 지나면 사라지고, 검색·집계가 안 되고, "이미 처리했는지" 를 표시할 자리가 없다.
+
+```sh
+docker exec kafka-lab-postgres psql -U kafkalab -d kafkalab -c \
+  "select id, original_topic, original_consumer_group, exception_class, status, failed_at
+     from failed_events where status='PENDING' order by id desc;"
+
+# 원인별 집계
+docker exec kafka-lab-postgres psql -U kafkalab -d kafkalab -c \
+  "select exception_class, count(*) from failed_events group by 1 order by 2 desc;"
+```
+
+역할이 나뉜다. **DLT 토픽 = 재발행할 원본 데이터, `failed_events` = 조사·추적용 인덱스.**
+둘 다 있어야 한다.
+
+#### 재처리 — 원인을 고친 뒤 원본 토픽에 다시 넣는다
+
+자동 재처리는 넣지 않았다. 원인을 모른 채 되돌리면 같은 실패를 반복하고, 최악의 경우
+DLT → 원본 → DLT 로 무한히 돈다. 사람이 판단하는 게 기본이다.
+
+```sh
+# 1. DLT 를 키까지 함께 뽑는다. 키가 없으면 다른 파티션으로 흩어져 순서가 깨진다.
+docker exec kafka-lab-broker /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic order.events.DLT --from-beginning \
+  --formatter-property print.key=true --formatter-property key.separator='|' \
+  --timeout-ms 8000 > dlt.txt
+
+# 2. 원인을 고친다 (여기서는 mock-pg 를 되살리는 것)
+docker compose start mock-pg
+
+# 3. 원본 토픽에 재발행
+cat dlt.txt | docker exec -i kafka-lab-broker /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 --topic order.events \
+  --property parse.key=true --property key.separator='|'
+
+# 4. 손댄 건은 상태를 바꿔둔다
+docker exec kafka-lab-postgres psql -U kafkalab -d kafkalab -c \
+  "update failed_events set status='RETRIED', retry_count=retry_count+1, last_retried_at=now()
+     where status='PENDING';"
+```
+
+**재처리가 안전한 이유는 멱등 컨슈머가 있기 때문이다.** 결제가 성공한 뒤 다른 단계에서 터져 DLT 로 갔다면,
+재처리해도 `processed_events` 가 막아 이중 결제가 나지 않는다. 멱등성 없이 재처리하면 사고다.
+
+주의: 재처리 시점에는 그 주문의 후속 이벤트가 이미 처리됐을 수 있다. **순서는 이미 깨져 있다.**
+
 ### 4. 거절은 재시도하지 않는다
 
 ```sh
@@ -249,7 +297,7 @@ kafka-lab/
 │   ├── notification/  알림 컨슈머
 │   ├── idempotency/   처리 이력 테이블
 │   ├── outbox/        아웃박스 엔티티·릴레이
-│   └── dlt/           DLT 감시
+│   └── dlt/           DLT 감시 + 실패 이력 테이블
 └── mock-pg/           별도 모듈. Ktor 로 만든 가짜 결제 게이트웨이 (Docker 이미지)
 ```
 

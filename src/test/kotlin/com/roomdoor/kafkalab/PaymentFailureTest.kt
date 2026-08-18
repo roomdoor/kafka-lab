@@ -1,11 +1,14 @@
 package com.roomdoor.kafkalab
 
 import com.roomdoor.kafkalab.config.Topics
+import com.roomdoor.kafkalab.dlt.FailedEventRepository
+import com.roomdoor.kafkalab.dlt.FailedEventStatus
 import com.roomdoor.kafkalab.order.OrderEvent
 import com.roomdoor.kafkalab.order.OrderEventType
 import com.roomdoor.kafkalab.order.OrderRepository
 import com.roomdoor.kafkalab.order.OrderService
 import com.roomdoor.kafkalab.order.OrderStatus
+import com.roomdoor.kafkalab.payment.PaymentConsumer
 import com.roomdoor.kafkalab.payment.PaymentRepository
 import com.roomdoor.kafkalab.payment.PaymentStatus
 import com.roomdoor.kafkalab.support.IntegrationTestBase
@@ -39,6 +42,9 @@ class PaymentFailureTest : IntegrationTestBase() {
 	@Autowired
 	private lateinit var paymentRepository: PaymentRepository
 
+	@Autowired
+	private lateinit var failedEventRepository: FailedEventRepository
+
 	@Test
 	fun `게이트웨이 일시 장애는 재시도 후 DLT 로 간다`() {
 		// 항상 500 을 돌려주도록 바꾼다. docker compose stop mock-pg 와 같은 상황이다.
@@ -59,6 +65,25 @@ class PaymentFailureTest : IntegrationTestBase() {
 			orderRepository.findByOrderId(order.orderId)?.status,
 			"상태는 그대로 CREATED 여야 한다",
 		)
+
+		// 로그만 남기면 나중에 조사할 수가 없다. 조회·집계·상태 표시가 가능하도록 DB 에도 적는다.
+		await().atMost(Duration.ofSeconds(20)).untilAsserted {
+			val recorded = failedEventRepository.findByStatusOrderByIdDesc(FailedEventStatus.PENDING)
+				.firstOrNull { it.payload.contains(order.orderId) }
+
+			assertNotNull(recorded, "실패가 failed_events 에 기록돼야 한다")
+			assertEquals(Topics.ORDER_EVENTS, recorded.originalTopic)
+			assertEquals(order.orderId, recorded.messageKey, "재발행하려면 파티션 키가 남아야 한다")
+			assertEquals(
+				PaymentConsumer.GROUP_ID,
+				recorded.originalConsumerGroup,
+				"어느 컨슈머 그룹이 실패했는지 남아야 범인을 찾을 수 있다",
+			)
+			assertTrue(
+				recorded.exceptionClass?.contains("PaymentGatewayException") == true,
+				"감싸인 예외가 아니라 진짜 원인이 남아야 한다. 실제 값=${recorded.exceptionClass}",
+			)
+		}
 	}
 
 	@Test
