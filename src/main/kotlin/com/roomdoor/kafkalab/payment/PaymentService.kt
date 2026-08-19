@@ -1,8 +1,6 @@
 package com.roomdoor.kafkalab.payment
 
 import com.roomdoor.kafkalab.config.Topics
-import com.roomdoor.kafkalab.idempotency.ProcessedEvent
-import com.roomdoor.kafkalab.idempotency.ProcessedEventRepository
 import com.roomdoor.kafkalab.notification.NotificationEvent
 import com.roomdoor.kafkalab.order.OrderEvent
 import com.roomdoor.kafkalab.order.OrderEventType
@@ -19,19 +17,17 @@ import java.util.UUID
  * DB 커넥션을 응답 대기 내내 붙잡아 커넥션 풀이 마른다. 호출은 [PaymentConsumer] 가 밖에서 끝내고,
  * 그 결과만 이 안에서 한 번에 커밋한다.
  *
- * 한 트랜잭션으로 묶는 것 네 가지:
- * 1. payments — 결제 결과
- * 2. processed_events — 이 이벤트를 처리했다는 표시
- * 3. outbox → order.events — 결제 완료/실패 이벤트
- * 4. outbox → notification.requested — 고객 알림 요청
+ * 한 트랜잭션으로 묶는 것 세 가지:
+ * 1. payments — 결제 결과. 이 행의 존재 자체가 "이미 처리했다" 는 증거라 별도 표시가 필요 없다
+ * 2. outbox → order.events — 결제 완료/실패 이벤트
+ * 3. outbox → notification.requested — 고객 알림 요청
  *
- * 이 중 하나라도 따로 커밋되면 정합성이 깨진다. 예를 들어 3번만 나가고 1번이 롤백되면
+ * 이 중 하나라도 따로 커밋되면 정합성이 깨진다. 예를 들어 2번만 나가고 1번이 롤백되면
  * "결제 완료" 이벤트는 흘러갔는데 결제 기록은 없는 상태가 된다.
  */
 @Service
 class PaymentService(
 	private val paymentRepository: PaymentRepository,
-	private val processedEventRepository: ProcessedEventRepository,
 	private val outboxWriter: OutboxWriter,
 ) {
 
@@ -46,8 +42,6 @@ class PaymentService(
 				pgTransactionId = transactionId,
 			)
 		)
-
-		markProcessed(event)
 
 		outboxWriter.write(
 			topic = Topics.ORDER_EVENTS,
@@ -83,8 +77,6 @@ class PaymentService(
 			)
 		)
 
-		markProcessed(event)
-
 		outboxWriter.write(
 			topic = Topics.ORDER_EVENTS,
 			partitionKey = event.orderId,
@@ -103,12 +95,6 @@ class PaymentService(
 		)
 
 		return payment
-	}
-
-	private fun markProcessed(event: OrderEvent) {
-		processedEventRepository.save(
-			ProcessedEvent(consumerGroup = PaymentConsumer.GROUP_ID, eventId = event.eventId)
-		)
 	}
 
 	private fun notification(event: OrderEvent, message: String) = NotificationEvent(

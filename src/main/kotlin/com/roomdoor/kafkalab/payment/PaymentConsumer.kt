@@ -1,7 +1,6 @@
 package com.roomdoor.kafkalab.payment
 
 import com.roomdoor.kafkalab.config.Topics
-import com.roomdoor.kafkalab.idempotency.ProcessedEventRepository
 import com.roomdoor.kafkalab.order.OrderEvent
 import com.roomdoor.kafkalab.order.OrderEventType
 import org.apache.kafka.clients.consumer.ConsumerRecord
@@ -26,7 +25,7 @@ class PaymentConsumer(
 	private val jsonMapper: JsonMapper,
 	private val paymentGatewayClient: PaymentGatewayClient,
 	private val paymentService: PaymentService,
-	private val processedEventRepository: ProcessedEventRepository,
+	private val paymentRepository: PaymentRepository,
 ) {
 
 	private val log = LoggerFactory.getLogger(javaClass)
@@ -43,7 +42,9 @@ class PaymentConsumer(
 		}
 
 		// 결제는 두 번 하면 안 되는 작업이다. Kafka 는 같은 메시지를 두 번 줄 수 있다.
-		if (processedEventRepository.existsByConsumerGroupAndEventId(GROUP_ID, event.eventId)) {
+		// 처리했다는 사실을 따로 적지 않는다. payments 에 그 주문 행이 있다는 것 자체가 증거다.
+		// 판별 기준이 eventId 가 아니라 orderId 라서, 같은 주문이 다른 eventId 로 두 번 발행돼도 막힌다.
+		if (paymentRepository.countByOrderId(event.orderId) > 0) {
 			log.warn("중복 수신, 건너뜀: eventId=${event.eventId} orderId=${event.orderId}")
 			ack.acknowledge()
 			return
@@ -71,8 +72,9 @@ class PaymentConsumer(
 				}
 			}
 		} catch (e: DataIntegrityViolationException) {
-			// processed_events 유니크 제약 위반 = 다른 스레드가 방금 같은 이벤트를 처리했다.
-			// 위의 exists 검사는 경합을 막지 못한다. 최종 방어선은 언제나 DB 제약이다.
+			// payments 부분 유니크 인덱스 위반 = 다른 스레드가 방금 같은 주문을 결제했다.
+			// 위의 count 검사는 경합을 막지 못한다. 최종 방어선은 언제나 DB 제약이다.
+			// PG 는 Idempotency-Key 로 이미 막았으니 돈이 두 번 나가지는 않는다.
 			log.warn("동시 처리 감지, 건너뜀: eventId=${event.eventId} (${e.javaClass.simpleName})")
 		}
 

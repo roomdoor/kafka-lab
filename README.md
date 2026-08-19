@@ -41,10 +41,10 @@ POST /api/orders
 PaymentConsumer   OrderStatusProjector
    │               (orders.status 갱신)
    │  ① 관심 없는 이벤트 걸러내기
-   │  ② 멱등 검사 (processed_events)
+   │  ② 멱등 검사 (payments 에 그 주문 결제가 있나)
    │  ③ 외부 PG 호출 ──HTTP──▶ mock-pg 컨테이너 (:9090)
    │  ④ @Transactional {
-   │       payments + processed_events + outbox 2건
+   │       payments + outbox 2건
    │     }
    ▼
  실패 시 → 0.5s → 1s → 2s 재시도 → order.events.DLT
@@ -67,7 +67,7 @@ PaymentConsumer   OrderStatusProjector
 | **실패 이력 기록과 재처리** | `FailedEvent`, `DeadLetterConsumer` |
 | **재시도 가능 실패 vs 불가능 실패** | `PaymentGatewayClient` |
 | 멱등 프로듀서 / `acks=all` | `KafkaProducerConfig` |
-| **DB 기반 멱등 컨슈머** | `ProcessedEvent`, `PaymentIdempotencyTest` |
+| **업무 테이블 제약으로 만드는 멱등 컨슈머** | `Payment`, `schema.sql`, `PaymentIdempotencyTest` |
 | **외부 API 멱등키** | `PaymentGatewayClient`, `MockPaymentGateway` |
 | 트랜잭셔널 아웃박스 | `OrderService`, `PaymentService`, `OutboxRelay` |
 | 자연 멱등이라 중복 검사가 필요 없는 경우 | `OrderStatusProjector` 주석 |
@@ -210,7 +210,7 @@ docker exec kafka-lab-postgres psql -U kafkalab -d kafkalab -c \
 ```
 
 **재처리가 안전한 이유는 멱등 컨슈머가 있기 때문이다.** 결제가 성공한 뒤 다른 단계에서 터져 DLT 로 갔다면,
-재처리해도 `processed_events` 가 막아 이중 결제가 나지 않는다. 멱등성 없이 재처리하면 사고다.
+재처리해도 `payments.order_id` 부분 유니크 인덱스가 막아 이중 결제가 나지 않는다. 멱등성 없이 재처리하면 사고다.
 
 주의: 재처리 시점에는 그 주문의 후속 이벤트가 이미 처리됐을 수 있다. **순서는 이미 깨져 있다.**
 
@@ -241,11 +241,15 @@ docker exec kafka-lab-broker /opt/kafka/bin/kafka-consumer-groups.sh \
 (먼저 앱을 내려야 한다. 오프셋 되감기는 그룹에 활성 컨슈머가 없을 때만 된다.)
 
 **확인할 것**: 과거 이벤트가 전부 다시 흘러들어오지만 `payments` 는 늘지 않는다.
-`processed_events` 테이블이 막는다. 예전에는 이 기록이 메모리에 있어서 재시작하면 사라졌다.
+"처리했다" 는 기록을 따로 두지 않는다. 결제 결과 자체가 증거이고, 최종 방어선은 DB 제약이다.
 
 ```sql
-select consumer_group, count(*) from processed_events group by 1;
+select order_id, count(*) from payments where status = 'COMPLETED' group by 1 having count(*) > 1;
+-- 한 건도 나오면 안 된다. uk_payments_completed_order 가 애초에 INSERT 를 거부한다.
 ```
+
+판별 기준이 `eventId` 가 아니라 `orderId` 라서 더 강하다. 버그로 같은 주문에 대해 **다른 eventId 로**
+`OrderCreated` 가 두 번 발행돼도 막힌다. eventId 기준이었다면 그대로 통과해 이중 결제가 났을 것이다.
 
 ### 6. 타임아웃 — 결제됐는지 모르는 상태
 
@@ -295,7 +299,6 @@ kafka-lab/
 │   ├── order/         주문 도메인, 이벤트 모델, 상태 프로젝터
 │   ├── payment/       결제 컨슈머, PG 클라이언트, 트랜잭션 경계
 │   ├── notification/  알림 컨슈머
-│   ├── idempotency/   처리 이력 테이블
 │   ├── outbox/        아웃박스 엔티티·릴레이
 │   └── dlt/           DLT 감시 + 실패 이력 테이블
 └── mock-pg/           별도 모듈. Ktor 로 만든 가짜 결제 게이트웨이 (Docker 이미지)

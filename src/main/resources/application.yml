@@ -12,6 +12,12 @@ spring:
       # 학습용 프로젝트라 스키마를 자동 생성한다. 운영이라면 Flyway 로 관리할 것.
       ddl-auto: update
     open-in-view: false
+    # schema.sql 을 Hibernate 가 테이블을 만든 뒤에 실행한다. 순서가 반대면 대상 테이블이 없어 실패한다.
+    defer-datasource-initialization: true
+
+  sql:
+    init:
+      mode: always
 
   kafka:
     bootstrap-servers: localhost:9092
