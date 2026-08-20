@@ -24,8 +24,8 @@ import kotlin.test.assertFailsWith
  * Kafka 는 at-least-once 라 중복은 예외 상황이 아니라 **정상 동작**이다.
  * 아웃박스 릴레이가 발행 직후 죽거나, 컨슈머가 커밋 전에 죽으면 같은 메시지가 다시 온다.
  *
- * 처리 이력을 따로 적지 않는다. payments 에 **성공한 결제**가 있다는 것 자체가 "이미 처리했다" 는 증거다.
- * 최종 방어선은 `uk_payments_completed_order` 부분 유니크 인덱스다.
+ * 처리 이력을 따로 적지 않는다. payments 행 자체가 "이미 처리했다 / 처리 중이다" 는 증거다.
+ * 최종 방어선은 `uk_payments_open_order` 부분 유니크 인덱스이고, PG 호출 전에 잡는 PENDING 예약이 그 제약을 건드린다.
  */
 class PaymentIdempotencyTest : IntegrationTestBase() {
 
@@ -63,15 +63,24 @@ class PaymentIdempotencyTest : IntegrationTestBase() {
 	/**
 	 * 컨슈머의 사전 조회는 빠른 길일 뿐이고, 동시에 들어온 두 스레드는 둘 다 통과한다.
 	 * 실제로 막는 것은 DB 제약이므로 그 제약이 살아있는지 직접 확인한다.
+	 *
+	 * PENDING 이 인덱스에 포함되는 게 핵심이다. 두 번째 예약이 여기서 막혀야 PG 호출이 한 번으로 끝난다.
 	 */
 	@Test
-	fun `성공한 결제는 주문당 하나만 저장되고 거절은 여러 건 쌓인다`() {
+	fun `한 주문에 진행 중이거나 성공한 결제는 하나뿐이고 거절은 여러 건 쌓인다`() {
 		val orderId = "order-constraint-${UUID.randomUUID()}"
 
-		paymentRepository.saveAndFlush(payment(orderId, PaymentStatus.COMPLETED))
+		val reserved = paymentRepository.saveAndFlush(payment(orderId, PaymentStatus.PENDING))
 
-		assertFailsWith<DataIntegrityViolationException>("같은 주문의 두 번째 성공 결제는 DB 가 거부해야 한다") {
-			paymentRepository.saveAndFlush(payment(orderId, PaymentStatus.COMPLETED))
+		assertFailsWith<DataIntegrityViolationException>("이미 처리 중인 주문의 두 번째 예약은 거부돼야 한다") {
+			paymentRepository.saveAndFlush(payment(orderId, PaymentStatus.PENDING))
+		}
+
+		reserved.status = PaymentStatus.COMPLETED
+		paymentRepository.saveAndFlush(reserved)
+
+		assertFailsWith<DataIntegrityViolationException>("이미 결제된 주문의 새 예약도 거부돼야 한다") {
+			paymentRepository.saveAndFlush(payment(orderId, PaymentStatus.PENDING))
 		}
 
 		// 거절까지 하나로 막으면 다른 카드로 다시 시도하는 흐름이 영영 막힌다.

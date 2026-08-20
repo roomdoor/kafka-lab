@@ -12,6 +12,6 @@ interface PaymentRepository : JpaRepository<Payment, Long> {
 
 	fun countByOrderId(orderId: String): Long
 
-	/** 멱등 검사용. 성공한 결제만 센다 — `uk_payments_completed_order` 와 같은 기준이어야 한다. */
+	/** 이미 끝난 주문인지 보는 빠른 길. 처리 중(PENDING)인 경우는 예약 INSERT 가 걸러낸다. */
 	fun countByOrderIdAndStatus(orderId: String, status: PaymentStatus): Long
 }

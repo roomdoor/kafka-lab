@@ -11,6 +11,8 @@ import jakarta.persistence.Table
 import java.time.Instant
 
 enum class PaymentStatus {
+	/** PG 호출 직전에 잡아두는 예약. 이 상태가 있다는 건 누군가 이 주문을 결제하는 중이라는 뜻이다. */
+	PENDING,
 	COMPLETED,
 	FAILED,
 }
@@ -23,7 +25,10 @@ enum class PaymentStatus {
  * 이게 없으면 우리 DB 와 PG 기록을 맞춰볼 방법이 없다.
  *
  * 이 테이블이 중복 결제를 막는 멱등 장치이기도 하다. `order_id` 에 걸린 부분 유니크 인덱스가
- * 성공한 결제를 주문당 하나로 제한한다 (`schema.sql`). 거절은 여러 건 쌓일 수 있다.
+ * **처리 중이거나 성공한** 결제를 주문당 하나로 제한한다 (`schema.sql`). 거절은 여러 건 쌓일 수 있다.
+ *
+ * PENDING 이 인덱스에 포함되는 게 핵심이다. PG 를 호출하기 전에 이 행을 먼저 INSERT 하므로,
+ * 같은 주문이 동시에 두 번 들어와도 진 쪽은 PG 를 아예 부르지 못한다.
  */
 @Entity
 @Table(name = "payments")
@@ -40,13 +45,13 @@ class Payment(
 
 	@Enumerated(EnumType.STRING)
 	@Column(nullable = false, length = 32)
-	val status: PaymentStatus,
+	var status: PaymentStatus,
 
 	@Column
-	val pgTransactionId: String? = null,
+	var pgTransactionId: String? = null,
 
 	@Column
-	val failureReason: String? = null,
+	var failureReason: String? = null,
 
 	@Column(nullable = false)
 	val createdAt: Instant = Instant.now(),

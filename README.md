@@ -41,10 +41,11 @@ POST /api/orders
 PaymentConsumer   OrderStatusProjector
    │               (orders.status 갱신)
    │  ① 관심 없는 이벤트 걸러내기
-   │  ② 멱등 검사 (payments 에 그 주문의 성공 결제가 있나)
-   │  ③ 외부 PG 호출 ──HTTP──▶ mock-pg 컨테이너 (:9090)
-   │  ④ @Transactional {
-   │       payments + outbox 2건
+   │  ② 이미 결제됐나 조회 (빠른 길. 경합은 못 막는다)
+   │  ③ payments 에 PENDING 예약 ← 여기서 유니크 제약이 승자를 정한다
+   │  ④ 외부 PG 호출 ──HTTP──▶ mock-pg 컨테이너 (:9090)
+   │  ⑤ @Transactional {
+   │       예약한 행 확정 + outbox 2건
    │     }
    ▼
  실패 시 → 0.5s → 1s → 2s 재시도 → order.events.DLT
@@ -83,7 +84,7 @@ docker compose up -d --build        # Kafka + kafka-ui + PostgreSQL + mock-pg
 
 첫 `--build` 는 mock-pg 이미지를 만드느라 몇 분 걸린다. 이후에는 `docker compose up -d` 로 충분하다.
 
-기동 시 `schema.sql` 이 `uk_payments_completed_order` 를 만든다. 이 인덱스가 생기기 전에 쌓인
+기동 시 `schema.sql` 이 `uk_payments_open_order` 를 만든다. 이 인덱스가 생기기 전에 쌓인
 데이터에 같은 주문의 성공 결제가 두 건 있으면 인덱스 생성이 실패하고 **앱이 뜨지 않는다.**
 제약을 조용히 건너뛰는 것보다 낫다고 보고 `continue-on-error` 는 켜지 않았다. 이때는 중복을 먼저 지운다.
 
@@ -259,23 +260,30 @@ docker exec kafka-lab-broker /opt/kafka/bin/kafka-consumer-groups.sh \
 "처리했다" 는 기록을 따로 두지 않는다. 결제 결과 자체가 증거이고, 최종 방어선은 DB 제약이다.
 
 ```sql
-select order_id, count(*) from payments where status = 'COMPLETED' group by 1 having count(*) > 1;
--- 한 건도 나오면 안 된다. uk_payments_completed_order 가 애초에 INSERT 를 거부한다.
+select order_id, count(*) from payments where status in ('PENDING', 'COMPLETED') group by 1 having count(*) > 1;
+-- 한 건도 나오면 안 된다. uk_payments_open_order 가 애초에 INSERT 를 거부한다.
 ```
 
 판별 기준이 `eventId` 가 아니라 `orderId` 라서 더 강하다. 버그로 같은 주문에 대해 **다른 eventId 로**
 `OrderCreated` 가 두 번 발행돼도 막힌다. eventId 기준이었다면 그대로 통과해 이중 결제가 났을 것이다.
 
-다만 그 경우 **PG 쪽은 이미 두 번 청구된 뒤일 수 있다.** 멱등키가 `eventId` 라서 PG 는 두 건을
-다른 결제로 본다. 우리 DB 만 막고 끝내면 아무도 모르므로, 이 경합을 `failed_events` 에 적어 둔다.
+**조회만으로는 부족하다는 게 이 절의 진짜 요점이다.** 조회하고 결제하고 저장하는 사이는 통째로 열려 있다.
+같은 주문이 다른 파티션에 실려 오거나 리밸런스가 끼면 두 스레드가 나란히 조회를 통과해
+결제를 두 번 하고, 그제서야 한 건이 제약에 걸린다 — 돈은 이미 나간 뒤다.
+
+그래서 **PG 를 부르기 전에 `PENDING` 행을 먼저 넣는다.** 진 쪽은 INSERT 가 거부돼 결제를 시도조차 못 한다.
+멱등성을 "이미 했는지 확인" 이 아니라 "자리를 선점" 으로 만드는 것이다.
 
 ```sql
-select * from failed_events where original_consumer_group = 'payment-service';
--- 여기 행이 있으면 PG 대시보드와 청구 건수를 대조해야 한다. 재발행 대상이 아니다.
+-- 결제 중인 주문 (평소엔 비어 있거나 순간적으로만 보인다)
+select * from payments where status = 'PENDING';
 ```
 
-거절은 이 제약 밖이다. 한도를 올린 뒤 DLT 에서 다시 흘리면 결제가 새로 시도된다.
-대가로 같은 거절이 두 번 처리되면 알림이 두 번 나간다 — 돈은 움직이지 않으므로 감수한다.
+PG 호출이 예외로 끝나면 예약을 지우고 예외를 다시 던진다. 안 지우면 Kafka 재시도가
+자기가 남긴 예약에 막혀 영영 결제되지 않는다. 다만 **호출 도중 프로세스가 죽으면 PENDING 이 남고**
+그 주문은 막힌다. 학습용이라 청소 배치는 두지 않았다 — 위 쿼리로 확인하고 손으로 지우면 된다.
+
+거절은 이 제약 밖이다(`FAILED` 는 인덱스에 없다). 한도를 올린 뒤 다시 흘리면 결제가 새로 시도된다.
 
 ### 6. 타임아웃 — 결제됐는지 모르는 상태
 

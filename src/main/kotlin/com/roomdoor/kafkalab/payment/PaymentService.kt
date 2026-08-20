@@ -24,6 +24,9 @@ import java.util.UUID
  *
  * 이 중 하나라도 따로 커밋되면 정합성이 깨진다. 예를 들어 2번만 나가고 1번이 롤백되면
  * "결제 완료" 이벤트는 흘러갔는데 결제 기록은 없는 상태가 된다.
+ *
+ * 트랜잭션이 하나 더 있다. [reserve] 는 PG 호출 **전에** 따로 커밋된다.
+ * 결과 확정과 같은 트랜잭션에 두면 커밋이 PG 응답 뒤로 밀려 예약의 의미가 사라진다.
  */
 @Service
 class PaymentService(
@@ -31,17 +34,35 @@ class PaymentService(
 	private val outboxWriter: OutboxWriter,
 ) {
 
+	/**
+	 * 결제 자리를 먼저 잡는다. `uk_payments_open_order` 위반이 나면 다른 쪽이 이미 잡은 것이므로
+	 * 호출자는 PG 를 부르지 않고 물러나야 한다.
+	 *
+	 * `saveAndFlush` 여야 한다. `save` 만 하면 INSERT 가 커밋 시점까지 미뤄져 제약 위반이
+	 * 이 메서드 밖에서 터진다 — 그때는 이미 PG 를 부른 뒤다.
+	 */
 	@Transactional
-	fun completePayment(event: OrderEvent, transactionId: String): Payment {
-		val payment = paymentRepository.save(
-			Payment(
-				paymentId = UUID.randomUUID().toString(),
-				orderId = event.orderId,
-				amount = event.amount,
-				status = PaymentStatus.COMPLETED,
-				pgTransactionId = transactionId,
-			)
+	fun reserve(event: OrderEvent): Payment = paymentRepository.saveAndFlush(
+		Payment(
+			paymentId = UUID.randomUUID().toString(),
+			orderId = event.orderId,
+			amount = event.amount,
+			status = PaymentStatus.PENDING,
 		)
+	)
+
+	/**
+	 * PG 호출이 예외로 끝났을 때 예약을 되돌린다. 붙잡은 채로 두면 Kafka 재시도가
+	 * 자기가 남긴 예약에 막혀 결제가 영영 안 된다.
+	 */
+	@Transactional
+	fun releaseReservation(payment: Payment) = paymentRepository.delete(payment)
+
+	@Transactional
+	fun completePayment(payment: Payment, event: OrderEvent, transactionId: String): Payment {
+		payment.status = PaymentStatus.COMPLETED
+		payment.pgTransactionId = transactionId
+		paymentRepository.save(payment)
 
 		outboxWriter.write(
 			topic = Topics.ORDER_EVENTS,
@@ -66,16 +87,11 @@ class PaymentService(
 	}
 
 	@Transactional
-	fun declinePayment(event: OrderEvent, reason: String): Payment {
-		val payment = paymentRepository.save(
-			Payment(
-				paymentId = UUID.randomUUID().toString(),
-				orderId = event.orderId,
-				amount = event.amount,
-				status = PaymentStatus.FAILED,
-				failureReason = reason,
-			)
-		)
+	fun declinePayment(payment: Payment, event: OrderEvent, reason: String): Payment {
+		// FAILED 로 내려가면 인덱스 밖으로 빠진다. 그래서 나중에 다시 시도할 수 있다.
+		payment.status = PaymentStatus.FAILED
+		payment.failureReason = reason
+		paymentRepository.save(payment)
 
 		outboxWriter.write(
 			topic = Topics.ORDER_EVENTS,
