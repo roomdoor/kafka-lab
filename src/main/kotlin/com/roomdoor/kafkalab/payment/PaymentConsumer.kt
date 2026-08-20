@@ -81,6 +81,9 @@ class PaymentConsumer(
 				amount = event.amount,
 			)
 		} catch (e: Exception) {
+			// 재시도가 성공해버리면 DLT 로 안 가고, 그러면 실패했다는 사실이 어디에도 안 남는다.
+			// 원인(타임아웃인지 5xx 인지)은 여기서만 알 수 있으므로 여기서 남긴다.
+			log.warn("PG 호출 실패, 예약 해제 후 재시도로 넘김: orderId=${event.orderId} (${e.javaClass.simpleName}: ${e.message})")
 			// 예약을 쥔 채 재시도로 넘기면 다음 배달이 자기가 남긴 예약에 막혀 영영 결제되지 않는다.
 			paymentService.releaseReservation(payment)
 			throw e
