@@ -5,7 +5,7 @@ import com.roomdoor.kafkalab.order.OrderEvent
 import com.roomdoor.kafkalab.order.OrderEventType
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.slf4j.LoggerFactory
-import org.springframework.dao.DataIntegrityViolationException
+import org.springframework.dao.DuplicateKeyException
 import org.springframework.kafka.annotation.KafkaListener
 import org.springframework.kafka.support.Acknowledgment
 import org.springframework.stereotype.Component
@@ -61,8 +61,12 @@ class PaymentConsumer(
 		// PG 호출 **전에** DB 제약으로 승자를 정해야 진 쪽이 결제를 못 한다.
 		val payment = try {
 			paymentService.reserve(event)
-		} catch (e: DataIntegrityViolationException) {
-			// 다른 쪽이 먼저 잡았다. 그쪽이 끝까지 처리하므로 여기서는 물러난다.
+		} catch (e: DuplicateKeyException) {
+			// 유니크 위반만 경합이다. 다른 쪽이 먼저 잡았고 그쪽이 끝까지 처리하므로 여기서는 물러난다.
+			//
+			// DataIntegrityViolationException 전체를 잡으면 안 된다. CHECK 제약 위반 같은 스키마 오류까지
+			// 경합으로 착각해 조용히 ack 하고, 그 주문은 결제도 DLT 도 없이 사라진다.
+			// 나머지 위반은 그대로 던져 재시도와 DLT 로 보낸다.
 			log.warn("처리 중인 주문, 건너뜀: eventId=${event.eventId} orderId=${event.orderId} (${e.javaClass.simpleName})")
 			ack.acknowledge()
 			return

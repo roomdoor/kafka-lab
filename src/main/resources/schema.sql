@@ -13,3 +13,11 @@ drop index if exists uk_payments_completed_order;
 create unique index if not exists uk_payments_open_order
 	on payments (order_id)
 	where status in ('PENDING', 'COMPLETED');
+
+-- Hibernate 는 @Enumerated(STRING) 컬럼에 값 목록을 CHECK 제약으로 만들어 둔다.
+-- 그런데 `ddl-auto: update` 는 **이미 있는 CHECK 제약을 갱신하지 않는다.**
+-- enum 에 값을 추가하면(PENDING 이 그랬다) 새 값이 DB 에서 거부되는데,
+-- 테스트는 create-drop 이라 매번 새로 만들어져 이 함정을 못 잡는다. 여기서 다시 세운다.
+alter table payments drop constraint if exists payments_status_check;
+alter table payments add constraint payments_status_check
+	check (status in ('PENDING', 'COMPLETED', 'FAILED'));

@@ -93,6 +93,11 @@ docker exec kafka-lab-postgres psql -U kafkalab -d kafkalab -c \
   "select order_id, count(*) from payments where status='COMPLETED' group by 1 having count(*) > 1;"
 ```
 
+`schema.sql` 은 `payments_status_check` 도 다시 세운다. Hibernate 가 `@Enumerated(STRING)` 컬럼에
+값 목록을 CHECK 제약으로 만들어 두는데 **`ddl-auto: update` 는 그 제약을 갱신하지 않기 때문**이다.
+enum 에 값을 추가하면 기존 DB 에서만 INSERT 가 거부되고, 테스트는 `create-drop` 이라 이 함정을 못 잡는다.
+`PaymentStatus.PENDING` 을 추가했을 때 실제로 겪은 일이다.
+
 `processed_events` 를 쓰던 시절의 DB 라면 그 테이블도 남아 있다. `ddl-auto: update` 는 지우지 않는다.
 
 ```sh
