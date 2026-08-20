@@ -29,6 +29,9 @@ dependencies {
 	implementation("org.springframework.boot:spring-boot-starter-webmvc")
 	implementation("org.springframework.boot:spring-boot-starter-data-jpa")
 	implementation("org.springframework.boot:spring-boot-starter-actuator")
+	// 컨트롤러·서비스 호출 로그를 메서드마다 손으로 넣지 않으려고 쓴다 (CallLoggingAspect).
+	// Spring Boot 4 에서 spring-boot-starter-aop 이 spring-boot-starter-aspectj 로 이름이 바뀌었다.
+	implementation("org.springframework.boot:spring-boot-starter-aspectj")
 	// spring-kafka 라이브러리만 넣으면 자동 설정이 딸려오지 않는다.
 	// Spring Boot 4 부터 자동 설정이 기술별 모듈로 쪼개졌고, KafkaAdmin(토픽 생성)과
 	// @KafkaListener 처리기(@EnableKafka)는 이 스타터에 들어 있다.

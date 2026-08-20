@@ -59,4 +59,8 @@ class Payment(
 	@Id
 	@GeneratedValue(strategy = GenerationType.IDENTITY)
 	val id: Long? = null,
-)
+) {
+
+	// 없으면 호출 로그에 Payment@4ffaf635 로 찍혀 아무것도 알 수 없다 (CallLoggingAspect).
+	override fun toString() = "Payment(orderId=$orderId, amount=$amount, status=$status)"
+}
