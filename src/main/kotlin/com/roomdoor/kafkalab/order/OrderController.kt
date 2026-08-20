@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
+import kotlin.random.Random
 
 @Tag(name = "주문", description = "주문 생성. 저장과 동시에 아웃박스에 이벤트가 기록되고 릴레이가 Kafka 로 발행한다.")
 @RestController
@@ -31,17 +32,41 @@ class OrderController(
 	)
 	@PostMapping
 	fun create(@RequestBody request: CreateOrderRequest): ResponseEntity<CreateOrderResponse> {
-		val order = orderService.createOrder(request.customerId, request.amount)
+		val order = orderService.createOrder(request.customerIdOrRandom(), request.amountOrRandom())
 		return ResponseEntity.status(HttpStatus.CREATED).body(CreateOrderResponse(order.orderId))
 	}
 
+	/**
+	 * 두 값 다 빼면 임의로 채운다. 파티션이 어떻게 갈리는지 보려면 주문을 여러 건 넣어야 하는데,
+	 * 매번 값을 지어내는 게 번거로워서 `{}` 만 던져도 되게 뒀다.
+	 */
 	data class CreateOrderRequest(
-		@field:Schema(description = "고객 ID. `FAIL` 을 주면 결제 컨슈머가 실패하도록 만들어져 있다.", example = "c-1")
-		val customerId: String,
+		@field:Schema(
+			description = "고객 ID. 알림 토픽의 파티션 키다. 빼면 c-0 ~ c-100 중 하나가 들어간다. `FAIL` 을 주면 결제 컨슈머가 실패하도록 만들어져 있다.",
+			example = "c-1",
+			nullable = true,
+		)
+		val customerId: String? = null,
 
-		@field:Schema(description = "주문 금액. 0 이하는 거절된다.", example = "25000")
-		val amount: Long,
-	)
+		@field:Schema(
+			description = "주문 금액. 0 이하는 거절된다. 빼면 10,000 ~ 1,000,000 중 하나가 들어간다(= PG 한도 안이라 항상 승인 대상).",
+			example = "25000",
+			nullable = true,
+		)
+		val amount: Long? = null,
+	) {
+
+		fun customerIdOrRandom() = customerId ?: "c-${Random.nextInt(0, CUSTOMER_COUNT + 1)}"
+
+		// 상한이 PG 거절 기준과 같다. 넘겨버리면 임의 주문이 가끔 거절돼 흐름을 보기 어려워진다.
+		fun amountOrRandom() = amount ?: Random.nextLong(MIN_AMOUNT, MAX_AMOUNT + 1)
+
+		companion object {
+			const val CUSTOMER_COUNT = 100
+			const val MIN_AMOUNT = 10_000L
+			const val MAX_AMOUNT = 1_000_000L
+		}
+	}
 
 	data class CreateOrderResponse(
 		@field:Schema(description = "생성된 주문 ID. Kafka 파티션 키로도 쓰인다.")
