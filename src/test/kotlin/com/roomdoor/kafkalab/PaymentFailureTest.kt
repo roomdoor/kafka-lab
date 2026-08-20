@@ -59,7 +59,7 @@ class PaymentFailureTest : IntegrationTestBase() {
 		assertNotNull(dltRecord, "재시도를 소진한 뒤 DLT 에 도착해야 한다")
 
 		// 결제는 확정되지 않았다. 나중에 사람이 DLT 를 보고 재처리해야 하는 상태.
-		assertNull(paymentRepository.findByOrderId(order.orderId), "결제 기록이 남으면 안 된다")
+		assertNull(paymentRepository.findTopByOrderIdOrderByIdDesc(order.orderId), "결제 기록이 남으면 안 된다")
 		assertEquals(
 			OrderStatus.CREATED,
 			orderRepository.findByOrderId(order.orderId)?.status,
@@ -92,7 +92,7 @@ class PaymentFailureTest : IntegrationTestBase() {
 		val order = orderService.createOrder("customer-declined", amount = 2_000_000)
 
 		await().atMost(Duration.ofSeconds(30)).untilAsserted {
-			val payment = paymentRepository.findByOrderId(order.orderId)
+			val payment = paymentRepository.findTopByOrderIdOrderByIdDesc(order.orderId)
 			assertNotNull(payment, "거절도 결과이므로 기록은 남아야 한다")
 			assertEquals(PaymentStatus.FAILED, payment.status)
 			assertTrue(payment.failureReason?.contains("한도 초과") == true, "사유가 남아야 한다")

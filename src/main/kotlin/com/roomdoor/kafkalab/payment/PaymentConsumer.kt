@@ -1,6 +1,8 @@
 package com.roomdoor.kafkalab.payment
 
 import com.roomdoor.kafkalab.config.Topics
+import com.roomdoor.kafkalab.dlt.FailedEvent
+import com.roomdoor.kafkalab.dlt.FailedEventRepository
 import com.roomdoor.kafkalab.order.OrderEvent
 import com.roomdoor.kafkalab.order.OrderEventType
 import org.apache.kafka.clients.consumer.ConsumerRecord
@@ -26,6 +28,7 @@ class PaymentConsumer(
 	private val paymentGatewayClient: PaymentGatewayClient,
 	private val paymentService: PaymentService,
 	private val paymentRepository: PaymentRepository,
+	private val failedEventRepository: FailedEventRepository,
 ) {
 
 	private val log = LoggerFactory.getLogger(javaClass)
@@ -42,9 +45,13 @@ class PaymentConsumer(
 		}
 
 		// 결제는 두 번 하면 안 되는 작업이다. Kafka 는 같은 메시지를 두 번 줄 수 있다.
-		// 처리했다는 사실을 따로 적지 않는다. payments 에 그 주문 행이 있다는 것 자체가 증거다.
+		// 처리했다는 사실을 따로 적지 않는다. payments 에 성공한 결제가 있다는 것 자체가 증거다.
 		// 판별 기준이 eventId 가 아니라 orderId 라서, 같은 주문이 다른 eventId 로 두 번 발행돼도 막힌다.
-		if (paymentRepository.countByOrderId(event.orderId) > 0) {
+		//
+		// COMPLETED 만 세는 이유는 `uk_payments_completed_order` 와 기준을 맞추기 위해서다.
+		// 거절까지 세면 한도를 올린 뒤 DLT 에서 재발행해도 영영 건너뛰어 주문이 실패로 굳는다.
+		// 대가로 같은 거절이 두 번 처리될 수 있다 — 알림이 두 번 나가지만 돈은 움직이지 않는다.
+		if (paymentRepository.countByOrderIdAndStatus(event.orderId, PaymentStatus.COMPLETED) > 0) {
 			log.warn("중복 수신, 건너뜀: eventId=${event.eventId} orderId=${event.orderId}")
 			ack.acknowledge()
 			return
@@ -72,14 +79,48 @@ class PaymentConsumer(
 				}
 			}
 		} catch (e: DataIntegrityViolationException) {
-			// payments 부분 유니크 인덱스 위반 = 다른 스레드가 방금 같은 주문을 결제했다.
+			// uk_payments_completed_order 위반 = 다른 스레드가 방금 같은 주문을 결제했다.
 			// 위의 count 검사는 경합을 막지 못한다. 최종 방어선은 언제나 DB 제약이다.
-			// PG 는 Idempotency-Key 로 이미 막았으니 돈이 두 번 나가지는 않는다.
-			log.warn("동시 처리 감지, 건너뜀: eventId=${event.eventId} (${e.javaClass.simpleName})")
+			//
+			// 여기 도달했다는 건 PG 호출이 이미 끝났다는 뜻이다. 멱등키는 eventId 라서,
+			// 두 메시지의 eventId 가 같으면 PG 가 막아준다. 하지만 **같은 주문이 다른 eventId 로**
+			// 두 번 발행된 경우 PG 는 서로 다른 결제로 보고 실제로 두 번 청구한다.
+			// 로그만 남기면 아무도 모른 채 지나간다. 대사할 수 있도록 실패 이력에 적는다.
+			recordSuspectedDoubleCharge(record, event, e)
 		}
 
 		// 처리가 끝난 뒤에만 커밋한다. 이 줄에 도달하기 전에 예외가 나면 오프셋은 그대로 남아 재시도된다.
 		ack.acknowledge()
+	}
+
+	/**
+	 * 사람이 봐야 하는 상태다. DLT 로 간 실패와 같은 테이블에 적어 조회 경로를 하나로 둔다.
+	 * 이 메시지는 재발행하면 안 된다 — 결제는 이미 됐고, 확인해야 할 것은 PG 쪽 청구 건수다.
+	 */
+	private fun recordSuspectedDoubleCharge(
+		record: ConsumerRecord<String, String>,
+		event: OrderEvent,
+		cause: DataIntegrityViolationException,
+	) {
+		log.error("이중 청구 의심: orderId=${event.orderId} eventId=${event.eventId} (${cause.javaClass.simpleName})")
+
+		try {
+			failedEventRepository.save(
+				FailedEvent(
+					originalTopic = record.topic(),
+					originalPartition = record.partition(),
+					originalOffset = record.offset(),
+					originalConsumerGroup = GROUP_ID,
+					messageKey = record.key(),
+					payload = record.value(),
+					exceptionClass = cause.javaClass.name,
+					exceptionMessage = "같은 주문에 성공한 결제가 이미 있다. PG 에 중복 청구가 없는지 대사가 필요하다.",
+				)
+			)
+		} catch (e: DataIntegrityViolationException) {
+			// 이미 적어둔 건이다. 오프셋을 되감아 다시 읽으면 여기로 온다.
+			log.warn("이미 기록된 이중 청구 의심, 건너뜀: orderId=${event.orderId} (${e.javaClass.simpleName})")
+		}
 	}
 
 	companion object {

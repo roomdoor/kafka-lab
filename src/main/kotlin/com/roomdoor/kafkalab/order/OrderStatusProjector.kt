@@ -20,6 +20,9 @@ import tools.jackson.databind.json.JsonMapper
  * 결제처럼 "실행할 때마다 돈이 나가는" 작업만 중복 검사가 필요하다.
  * 중복 방어는 공짜가 아니므로 필요한 곳에만 둔다.
  *
+ * 다만 상태 전이에는 한 방향 규칙이 하나 있다. PAID 는 PAYMENT_FAILED 로 내려가지 않는다.
+ * 자연 멱등은 "같은 이벤트가 두 번" 을 감당할 뿐, "서로 다른 결론이 둘" 을 감당하지는 못한다.
+ *
  * 그리고 이 컨슈머는 순서에 의존한다. PAYMENT_COMPLETED 가 ORDER_CREATED 보다 먼저 오면
  * 갱신할 주문이 없다. 같은 orderId 를 키로 써서 한 파티션에 순서대로 넣는 이유가 이것이다.
  */
@@ -48,6 +51,10 @@ class OrderStatusProjector(
 			if (order == null) {
 				// 순서가 뒤집혔거나 다른 환경의 이벤트다. 재시도해도 생기지 않으므로 넘긴다.
 				log.warn("주문을 찾을 수 없어 상태 갱신 생략: orderId=${event.orderId}")
+			} else if (order.status == OrderStatus.PAID && newStatus == OrderStatus.PAYMENT_FAILED) {
+				// 중복 처리 경합에서 한쪽은 승인, 한쪽은 거절로 갈리면 두 이벤트가 모두 나간다.
+				// 돈이 나간 사실이 우선이다. PAID 를 실패로 덮으면 결제된 주문이 실패로 보인다.
+				log.error("결제 완료된 주문에 실패 이벤트 도착, 무시: orderId=${event.orderId} eventId=${event.eventId}")
 			} else {
 				order.status = newStatus
 				log.info("주문 상태 갱신: orderId=${event.orderId} → $newStatus partition=${record.partition()} offset=${record.offset()}")

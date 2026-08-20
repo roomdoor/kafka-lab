@@ -41,7 +41,7 @@ POST /api/orders
 PaymentConsumer   OrderStatusProjector
    │               (orders.status 갱신)
    │  ① 관심 없는 이벤트 걸러내기
-   │  ② 멱등 검사 (payments 에 그 주문 결제가 있나)
+   │  ② 멱등 검사 (payments 에 그 주문의 성공 결제가 있나)
    │  ③ 외부 PG 호출 ──HTTP──▶ mock-pg 컨테이너 (:9090)
    │  ④ @Transactional {
    │       payments + outbox 2건
@@ -82,6 +82,21 @@ docker compose up -d --build        # Kafka + kafka-ui + PostgreSQL + mock-pg
 ```
 
 첫 `--build` 는 mock-pg 이미지를 만드느라 몇 분 걸린다. 이후에는 `docker compose up -d` 로 충분하다.
+
+기동 시 `schema.sql` 이 `uk_payments_completed_order` 를 만든다. 이 인덱스가 생기기 전에 쌓인
+데이터에 같은 주문의 성공 결제가 두 건 있으면 인덱스 생성이 실패하고 **앱이 뜨지 않는다.**
+제약을 조용히 건너뛰는 것보다 낫다고 보고 `continue-on-error` 는 켜지 않았다. 이때는 중복을 먼저 지운다.
+
+```sh
+docker exec kafka-lab-postgres psql -U kafkalab -d kafkalab -c \
+  "select order_id, count(*) from payments where status='COMPLETED' group by 1 having count(*) > 1;"
+```
+
+`processed_events` 를 쓰던 시절의 DB 라면 그 테이블도 남아 있다. `ddl-auto: update` 는 지우지 않는다.
+
+```sh
+docker exec kafka-lab-postgres psql -U kafkalab -d kafkalab -c "drop table if exists processed_events;"
+```
 
 - **Swagger UI: http://localhost:8080/swagger-ui/index.html** ← 여기서 바로 호출
 - Kafka UI: http://localhost:8081 (토픽·파티션·컨슈머 랙)
@@ -250,6 +265,17 @@ select order_id, count(*) from payments where status = 'COMPLETED' group by 1 ha
 
 판별 기준이 `eventId` 가 아니라 `orderId` 라서 더 강하다. 버그로 같은 주문에 대해 **다른 eventId 로**
 `OrderCreated` 가 두 번 발행돼도 막힌다. eventId 기준이었다면 그대로 통과해 이중 결제가 났을 것이다.
+
+다만 그 경우 **PG 쪽은 이미 두 번 청구된 뒤일 수 있다.** 멱등키가 `eventId` 라서 PG 는 두 건을
+다른 결제로 본다. 우리 DB 만 막고 끝내면 아무도 모르므로, 이 경합을 `failed_events` 에 적어 둔다.
+
+```sql
+select * from failed_events where original_consumer_group = 'payment-service';
+-- 여기 행이 있으면 PG 대시보드와 청구 건수를 대조해야 한다. 재발행 대상이 아니다.
+```
+
+거절은 이 제약 밖이다. 한도를 올린 뒤 DLT 에서 다시 흘리면 결제가 새로 시도된다.
+대가로 같은 거절이 두 번 처리되면 알림이 두 번 나간다 — 돈은 움직이지 않으므로 감수한다.
 
 ### 6. 타임아웃 — 결제됐는지 모르는 상태
 

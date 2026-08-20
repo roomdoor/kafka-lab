@@ -42,7 +42,7 @@ class OrderEventChainTest : IntegrationTestBase() {
 
 		// 결제가 끝날 때까지 기다린다. 아웃박스 폴링(500ms) + 외부 호출이 걸린다.
 		await().atMost(Duration.ofSeconds(30)).untilAsserted {
-			val payment = paymentRepository.findByOrderId(order.orderId)
+			val payment = paymentRepository.findTopByOrderIdOrderByIdDesc(order.orderId)
 			assertNotNull(payment, "결제 기록이 DB 에 남아야 한다")
 			assertEquals(PaymentStatus.COMPLETED, payment.status)
 			assertNotNull(payment.pgTransactionId, "PG 거래번호가 저장돼야 대사가 가능하다")
