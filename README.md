@@ -8,6 +8,8 @@ Kafka를 실무에서 쓸 때 실제로 마주치는 문제들을 하나씩 재�
 
 **Kotlin 2.2 / Spring Boot 4.0 / Kafka 4.3 (KRaft) / PostgreSQL 17 / Ktor 3.5 / Testcontainers**
 
+최근 작업 내역과 남은 일은 [HANDOFF.md](HANDOFF.md)에 있다.
+
 ---
 
 ## 전체 흐름
