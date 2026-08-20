@@ -1,5 +1,7 @@
 package com.roomdoor.kafkalab.order
 
+import com.fasterxml.jackson.annotation.JsonSetter
+import com.fasterxml.jackson.annotation.Nulls
 import io.swagger.v3.oas.annotations.Operation
 import io.swagger.v3.oas.annotations.media.Schema
 import io.swagger.v3.oas.annotations.tags.Tag
@@ -32,34 +34,35 @@ class OrderController(
 	)
 	@PostMapping
 	fun create(@RequestBody request: CreateOrderRequest): ResponseEntity<CreateOrderResponse> {
-		val order = orderService.createOrder(request.customerIdOrRandom(), request.amountOrRandom())
+		val order = orderService.createOrder(request.customerId, request.amount)
 		return ResponseEntity.status(HttpStatus.CREATED).body(CreateOrderResponse(order.orderId))
 	}
 
 	/**
 	 * 두 값 다 빼면 임의로 채운다. 파티션이 어떻게 갈리는지 보려면 주문을 여러 건 넣어야 하는데,
 	 * 매번 값을 지어내는 게 번거로워서 `{}` 만 던져도 되게 뒀다.
+	 *
+	 * `@JsonSetter(nulls = Nulls.SKIP)` 이 있어야 `{"customerId": null}` 도 기본값으로 채워진다.
+	 * Kotlin 기본값은 **키가 아예 없을 때만** 쓰이고, null 이 명시되면 그 null 이 그대로 들어오기 때문이다.
 	 */
 	data class CreateOrderRequest(
 		@field:Schema(
-			description = "고객 ID. 알림 토픽의 파티션 키다. 빼면 c-0 ~ c-100 중 하나가 들어간다. `FAIL` 을 주면 결제 컨슈머가 실패하도록 만들어져 있다.",
+			description = "고객 ID. 알림 토픽의 파티션 키다. 빼거나 null 이면 c-0 ~ c-100 중 하나가 들어간다. `FAIL` 을 주면 결제 컨슈머가 실패하도록 만들어져 있다.",
 			example = "c-1",
 			nullable = true,
 		)
-		val customerId: String? = null,
+		@param:JsonSetter(nulls = Nulls.SKIP)
+		val customerId: String = "c-${Random.nextInt(0, CUSTOMER_COUNT + 1)}",
 
 		@field:Schema(
-			description = "주문 금액. 0 이하는 거절된다. 빼면 10,000 ~ 1,000,000 중 하나가 들어간다(= PG 한도 안이라 항상 승인 대상).",
+			description = "주문 금액. 0 이하는 거절된다. 빼거나 null 이면 10,000 ~ 1,000,000 중 하나가 들어간다(= PG 한도 안이라 항상 승인 대상).",
 			example = "25000",
 			nullable = true,
 		)
-		val amount: Long? = null,
-	) {
-
-		fun customerIdOrRandom() = customerId ?: "c-${Random.nextInt(0, CUSTOMER_COUNT + 1)}"
-
+		@param:JsonSetter(nulls = Nulls.SKIP)
 		// 상한이 PG 거절 기준과 같다. 넘겨버리면 임의 주문이 가끔 거절돼 흐름을 보기 어려워진다.
-		fun amountOrRandom() = amount ?: Random.nextLong(MIN_AMOUNT, MAX_AMOUNT + 1)
+		val amount: Long = Random.nextLong(MIN_AMOUNT, MAX_AMOUNT + 1),
+	) {
 
 		companion object {
 			const val CUSTOMER_COUNT = 100
