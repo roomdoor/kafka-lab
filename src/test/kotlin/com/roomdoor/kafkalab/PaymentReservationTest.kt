@@ -219,6 +219,29 @@ class PaymentReservationTest : IntegrationTestBase() {
 		assertEquals(PaymentStatus.PENDING, paymentRepository.findById(reservedByFirst.id!!).orElse(null)?.status)
 	}
 
+	/**
+	 * #11. 거절을 확정한 뒤 ack 전에 죽으면 같은 레코드가 다시 온다. FAILED 는 예약 인덱스 밖이라 재배달이 새로 예약하고,
+	 * PG 가 402 를 재생하면 거절 이벤트와 알림이 한 번 더 나간다.
+	 */
+	@Test
+	fun `거절을 확정한 뒤 재배달돼도 거절 이벤트는 한 번만 나간다`() {
+		// 기본 설정은 100만 원 초과를 거절한다.
+		val event = orderCreated("order-decline-redelivery-${UUID.randomUUID()}").copy(amount = 2_000_000)
+		val record = record(event)
+
+		paymentConsumer.consume(record, Acknowledgment { })
+		var redeliveryAcked = false
+		paymentConsumer.consume(record, Acknowledgment { redeliveryAcked = true })
+
+		assertTrue(redeliveryAcked, "이미 처리된 거절이므로 재시도 없이 ack 해야 한다")
+		assertEquals(1, paymentRepository.countByOrderId(event.orderId), "재배달이 FAILED 행을 또 만들면 안 된다")
+		assertEquals(
+			1,
+			outboxRepository.findAll().count { it.aggregateId == event.orderId && it.payload.contains("PAYMENT_FAILED") },
+			"거절 이벤트가 두 번 나가면 알림도 두 번 간다",
+		)
+	}
+
 	private fun orderCreated(orderId: String) = OrderEvent(
 		eventId = UUID.randomUUID().toString(),
 		eventType = OrderEventType.ORDER_CREATED,

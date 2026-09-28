@@ -60,6 +60,16 @@ class PaymentConsumer(
 			return
 		}
 
+		// 같은 이벤트가 이미 거절로 끝났으면 재배달이다(거절 확정 뒤 ack 전에 죽음). FAILED 는 예약 인덱스 밖이라
+		// 그냥 두면 새로 예약하고, PG 가 402 를 재생해 거절 이벤트와 알림이 한 번 더 나간다.
+		// 주문이 아니라 eventId 로 본다. 다른 eventId 는 다른 카드로 다시 시도하는 흐름이라 막으면 안 된다.
+		// ponytail: 이 조회와 아래 예약 사이에 첫 배달이 거절을 확정하면 틈이 남는다. 막으려면 event_id 유니크 인덱스.
+		if (paymentRepository.countByEventIdAndStatus(event.eventId, PaymentStatus.FAILED) > 0) {
+			log.warn("이미 거절된 이벤트, 건너뜀: eventId=${event.eventId} orderId=${event.orderId}")
+			ack.acknowledge()
+			return
+		}
+
 		// 자리를 먼저 잡는다. 위의 조회는 빠른 길일 뿐 경합을 막지 못한다 —
 		// 같은 주문이 다른 파티션에 실려 오거나 리밸런스 중이면 두 스레드가 나란히 통과한다.
 		// PG 호출 **전에** DB 제약으로 승자를 정해야 진 쪽이 결제를 못 한다.
