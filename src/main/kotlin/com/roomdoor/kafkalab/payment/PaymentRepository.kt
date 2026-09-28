@@ -3,6 +3,7 @@ package com.roomdoor.kafkalab.payment
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
+import java.time.Instant
 
 interface PaymentRepository : JpaRepository<Payment, Long> {
 
@@ -33,8 +34,29 @@ interface PaymentRepository : JpaRepository<Payment, Long> {
 	)
 	fun finalizePending(id: Long, status: PaymentStatus, transactionId: String?, failureReason: String?): Int
 
-	/** PENDING 인 예약만 지운다. 같은 eventId 의 다른 배달이 먼저 확정한 결과를 지우지 않으려는 것이다. */
+	/**
+	 * 아무도 이어받지 않은 PENDING 예약만 지운다. 같은 eventId 의 다른 배달이 먼저 확정한 결과도,
+	 * 지금 이어받아 PG 를 부르는 중인 예약도 지우지 않으려는 것이다.
+	 */
 	@Modifying
-	@Query("delete from Payment p where p.id = :id and p.status = com.roomdoor.kafkalab.payment.PaymentStatus.PENDING")
+	@Query(
+		"""
+		delete from Payment p
+		where p.id = :id and p.status = com.roomdoor.kafkalab.payment.PaymentStatus.PENDING and p.takenOverAt is null
+		"""
+	)
 	fun deletePending(id: Long): Int
+
+	/**
+	 * 이어받기 표시. PENDING 일 때만 된다. 0 이면 그 사이 예약이 풀렸거나 확정된 것이라 이어받으면 안 된다.
+	 * 표시와 해제([deletePending])가 같은 행 락으로 줄을 서므로 둘 중 하나만 이긴다.
+	 */
+	@Modifying
+	@Query(
+		"""
+		update Payment p set p.takenOverAt = :now
+		where p.id = :id and p.status = com.roomdoor.kafkalab.payment.PaymentStatus.PENDING
+		"""
+	)
+	fun markTakenOver(id: Long, now: Instant): Int
 }

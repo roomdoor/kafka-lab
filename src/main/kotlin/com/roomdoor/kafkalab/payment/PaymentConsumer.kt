@@ -88,6 +88,12 @@ class PaymentConsumer(
 			if (mine == null) {
 				throw IllegalStateException("다른 eventId 가 결제 중인 주문: eventId=${event.eventId} orderId=${event.orderId}")
 			}
+			// 이어받기를 DB 에 표시해야 첫 배달이 확실한 실패로 예약을 풀지 못한다. 표시 없이 PG 를 부르면
+			// 그 사이 첫 배달이 예약을 지워 자리가 비고, 다른 eventId 가 새 멱등키로 결제한다.
+			// 표시가 0건이면 방금 풀렸거나 확정된 것이다. 재시도가 새로 예약하거나 COMPLETED 를 보고 건너뛴다.
+			if (!paymentService.takeOver(mine)) {
+				throw IllegalStateException("이어받으려던 예약이 방금 바뀜: eventId=${event.eventId} orderId=${event.orderId}")
+			}
 			log.info("앞선 시도의 예약을 이어받음: eventId=${event.eventId} orderId=${event.orderId}")
 			takenOver = true
 			mine
@@ -111,7 +117,9 @@ class PaymentConsumer(
 			// 이어받은 예약은 이번 실패가 확실해도 풀지 않는다. 앞선 시도가 이미 결제했을 수 있다.
 			val release = !takenOver && e is PaymentGatewayException && !e.outcomeUnknown
 			log.warn("PG 호출 실패, ${if (release) "예약 해제" else "예약 유지"} 후 재시도로 넘김: orderId=${event.orderId} (${e.javaClass.simpleName}: ${e.message})")
-			if (release) paymentService.releaseReservation(payment)
+			if (release && !paymentService.releaseReservation(payment)) {
+				log.warn("예약을 다른 배달이 이어받았거나 확정해 해제하지 않음: orderId=${event.orderId}")
+			}
 			throw e
 		}
 

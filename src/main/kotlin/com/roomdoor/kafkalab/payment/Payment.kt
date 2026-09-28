@@ -51,6 +51,13 @@ class Payment(
 	@Column
 	val eventId: String? = null,
 
+	/**
+	 * 같은 eventId 의 재배달이 이 예약을 이어받은 시각. 한 번이라도 이어받았으면 예약을 잡은 첫 배달이 풀지 못한다.
+	 * 첫 배달의 실패가 확실해도 이어받은 쪽이 지금 PG 를 부르고 있을 수 있기 때문이다.
+	 */
+	@Column
+	var takenOverAt: Instant? = null,
+
 	@Enumerated(EnumType.STRING)
 	@Column(nullable = false, length = 32)
 	var status: PaymentStatus,

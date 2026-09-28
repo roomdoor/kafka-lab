@@ -12,7 +12,8 @@ import java.net.ConnectException
 import java.time.Duration
 
 /**
- * 재시도하면 결과가 달라질 수 있는 실패. 이 예외만 Kafka 재시도로 넘긴다.
+ * 재시도하면 결과가 달라질 수 있는 PG 실패. 거절처럼 다시 물어도 같은 결과는 이 예외가 아니라 [PaymentGatewayResult] 로 돌려준다.
+ * (Kafka 에러 핸들러는 IllegalArgumentException 말고는 다 재시도한다. 결제 컨슈머의 IllegalStateException 경로도 재시도에 기댄다.)
  *
  * [outcomeUnknown] 이 true 면 PG 가 결제했는지 모른다. 호출자는 예약을 풀면 안 된다 —
  * 풀면 같은 주문이 다른 멱등키로 다시 결제될 수 있다. 기본값이 true 인 건 모를 때는 모른다고 보는 게 안전해서다.

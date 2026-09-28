@@ -203,6 +203,22 @@ class PaymentReservationTest : IntegrationTestBase() {
 		assertEquals(PaymentStatus.COMPLETED, paymentRepository.findById(stale.id!!).orElse(null)?.status)
 	}
 
+	/**
+	 * 첫 배달이 커넥션 거부(확실한 실패)로 예약을 풀려는 사이, 같은 eventId 의 재배달이 이미 이어받아 PG 를 부르고 있다.
+	 * 여기서 지우면 자리가 비어 다른 eventId 가 새 멱등키로 결제한다. 이어받은 예약은 첫 배달이 풀지 못해야 한다.
+	 */
+	@Test
+	fun `이어받은 예약은 처음 잡은 배달이 풀지 못한다`() {
+		val event = orderCreated("order-takeover-release-${UUID.randomUUID()}")
+		val reservedByFirst = paymentService.reserve(event)
+
+		assertTrue(paymentService.takeOver(paymentRepository.findById(reservedByFirst.id!!).get()))
+		val released = paymentService.releaseReservation(reservedByFirst)
+
+		assertFalse(released)
+		assertEquals(PaymentStatus.PENDING, paymentRepository.findById(reservedByFirst.id!!).orElse(null)?.status)
+	}
+
 	private fun orderCreated(orderId: String) = OrderEvent(
 		eventId = UUID.randomUUID().toString(),
 		eventType = OrderEventType.ORDER_CREATED,

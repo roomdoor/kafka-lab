@@ -58,11 +58,19 @@ class PaymentService(
 	 *
 	 * PENDING 일 때만 지운다. 들고 있는 엔티티는 예약 시점의 사본이라, 그 사이 같은 eventId 의 다른 배달이
 	 * 확정한 COMPLETED 행을 그대로 delete 하면 결제 기록이 사라진다.
+	 * 누가 이어받은 예약도 지우지 않는다. 이어받은 쪽이 PG 를 부르는 사이 자리가 비면 다른 eventId 가 새 멱등키로 결제한다.
+	 *
+	 * @return 실제로 지웠으면 true. false 는 그 사이 누가 이어받았거나 확정한 것이라 그대로 두면 된다.
 	 */
 	@Transactional
-	fun releaseReservation(payment: Payment) {
-		paymentRepository.deletePending(payment.id!!)
-	}
+	fun releaseReservation(payment: Payment): Boolean = paymentRepository.deletePending(payment.id!!) == 1
+
+	/**
+	 * 같은 eventId 의 예약을 이어받는다고 표시한다. 첫 배달이 그 사이 예약을 풀었거나 확정했으면 false 이고,
+	 * 호출자는 PG 를 부르지 말아야 한다.
+	 */
+	@Transactional
+	fun takeOver(payment: Payment): Boolean = paymentRepository.markTakenOver(payment.id!!, Instant.now()) == 1
 
 	@Transactional
 	fun completePayment(payment: Payment, event: OrderEvent, transactionId: String): Payment {
