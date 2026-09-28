@@ -32,6 +32,8 @@ class DeadLetterConsumer(
 		topics = [Topics.ORDER_EVENTS_DLT, Topics.NOTIFICATION_REQUESTED_DLT],
 		groupId = GROUP_ID,
 		concurrency = "1",
+		// 기본 팩토리는 실패를 <topic>.DLT 로 보낸다. 여기서는 .DLT.DLT 가 되므로 전용 팩토리를 쓴다.
+		containerFactory = "deadLetterListenerContainerFactory",
 	)
 	fun consume(record: ConsumerRecord<String, String>, ack: Acknowledgment) {
 		// DeadLetterPublishingRecoverer 가 원본 정보와 예외를 헤더에 담아준다.

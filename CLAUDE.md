@@ -18,7 +18,8 @@ docker compose up -d --build        # Kafka + kafka-ui + PostgreSQL + mock-pg
 ## 구조에서 놓치기 쉬운 것
 
 - 업무 이벤트는 같은 `@Transactional` 에서 `outbox` 행을 쓰고 `OutboxRelay` 가 발행한다. 컨슈머 결과(`PaymentService`)도 아웃박스를 거친다. 예외는 DLT 로, `DeadLetterPublishingRecoverer` 가 `KafkaTemplate` 으로 직접 보낸다.
-- 에러 핸들러(`KafkaConsumerConfig`)는 `DeadLetterConsumer` 를 포함한 모든 리스너 공통이다. 백오프 재시도 후 `<topic>.DLT`, `IllegalArgumentException` 등 비재시도 예외는 바로 DLT.
+- 에러 핸들러(`KafkaConsumerConfig`)는 `DeadLetterConsumer` 를 뺀 모든 리스너 공통이다. 백오프 재시도 후 `<topic>.DLT`, `IllegalArgumentException` 등 비재시도 예외는 바로 DLT.
+  `DeadLetterConsumer` 는 전용 팩토리(`deadLetterListenerContainerFactory`)라 2차 DLT 가 없다. DB 예외는 무한 재시도, 나머지는 ERROR 로그 후 건너뜀.
 - 결제 결과 분류는 `PaymentGatewayClient` 가 정한다. 2xx + `transactionId` 만 승인, 402 는 예외 없이 거절, 나머지 응답과 통신 실패는 예외 → 재시도 → DLT.
 - 결제 중복 방어는 PG 호출 전 `payments` 에 `PENDING` 을 넣고 `schema.sql` 의 부분 유니크 인덱스(`order_id`, PENDING/COMPLETED)로 승자를 정하는 방식이다. 이 흐름에는 알려진 구멍이 있다(#1, #2, mock-pg 쪽 #3). 바꾸기 전에 `PaymentConsumer` 전체와 이슈를 먼저 본다.
 - `mock-pg` 는 별도 Gradle 모듈이고 테스트에서만 `testImplementation(project(":mock-pg"))` 로 쓴다. 테스트는 `IntegrationTestBase` 가 같은 JVM 에 띄우고 매번 `MockPgConfig()` 로 되돌린다. `POST /_config` 는 설정 전체를 교체하므로 네 필드를 모두 보낸다.
