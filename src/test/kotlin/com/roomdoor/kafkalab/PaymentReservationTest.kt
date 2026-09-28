@@ -219,6 +219,51 @@ class PaymentReservationTest : IntegrationTestBase() {
 		assertEquals(PaymentStatus.PENDING, paymentRepository.findById(reservedByFirst.id!!).orElse(null)?.status)
 	}
 
+	/**
+	 * #11. 거절을 확정한 뒤 ack 전에 죽으면 같은 레코드가 다시 온다. FAILED 는 예약 인덱스 밖이라 재배달이 새로 예약하고,
+	 * PG 가 402 를 재생하면 거절 이벤트와 알림이 한 번 더 나간다.
+	 */
+	@Test
+	fun `거절을 확정한 뒤 재배달돼도 거절 이벤트는 한 번만 나간다`() {
+		// 기본 설정은 100만 원 초과를 거절한다.
+		val event = orderCreated("order-decline-redelivery-${UUID.randomUUID()}").copy(amount = 2_000_000)
+		val record = record(event)
+
+		paymentConsumer.consume(record, Acknowledgment { })
+		var redeliveryAcked = false
+		paymentConsumer.consume(record, Acknowledgment { redeliveryAcked = true })
+
+		assertTrue(redeliveryAcked, "이미 처리된 거절이므로 재시도 없이 ack 해야 한다")
+		assertEquals(1, paymentRepository.countByOrderId(event.orderId), "재배달이 FAILED 행을 또 만들면 안 된다")
+		assertEquals(
+			1,
+			outboxRepository.findAll().count { it.aggregateId == event.orderId && it.payload.contains("PAYMENT_FAILED") },
+			"거절 이벤트가 두 번 나가면 알림도 두 번 간다",
+		)
+	}
+
+	/**
+	 * 같은 eventId 에 FAILED 와 PENDING 이 함께 있다(두 배달이 동시에 달려 한쪽이 거절, 다른 쪽이 새로 예약한 뒤 결과 모름).
+	 * 그 PENDING 은 같은 eventId 의 재배달만 이어받을 수 있다. "이미 거절됨" 으로 건너뛰면 영영 남는다.
+	 */
+	@Test
+	fun `같은 eventId 의 PENDING 이 남아 있으면 거절 기록이 있어도 이어받는다`() {
+		// 실제로는 같은 키에 PG 가 402 를 재생하므로 거절 금액으로 둔다. 이어받은 예약도 거절로 끝난다.
+		val event = orderCreated("order-failed-and-pending-${UUID.randomUUID()}").copy(amount = 2_000_000)
+		paymentService.declinePayment(paymentService.reserve(event), event, "테스트 거절")
+		val pending = paymentService.reserve(event)
+
+		var acked = false
+		paymentConsumer.consume(record(event), Acknowledgment { acked = true })
+
+		assertTrue(acked)
+		assertEquals(
+			PaymentStatus.FAILED,
+			paymentRepository.findById(pending.id!!).orElse(null)?.status,
+			"거절 기록만 보고 건너뛰면 이 예약이 PENDING 에 갇힌다",
+		)
+	}
+
 	private fun orderCreated(orderId: String) = OrderEvent(
 		eventId = UUID.randomUUID().toString(),
 		eventType = OrderEventType.ORDER_CREATED,
