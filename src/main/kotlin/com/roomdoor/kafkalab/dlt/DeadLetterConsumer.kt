@@ -68,8 +68,8 @@ class DeadLetterConsumer(
 			failedEventRepository.save(failed)
 			log.error("처리 실패 기록: topic=$originalTopic partition=$originalPartition offset=$originalOffset group=${failed.originalConsumerGroup} 원인=${failed.exceptionClass}")
 		} catch (e: DataIntegrityViolationException) {
-			// 유니크 제약 위반 = 이미 적어둔 실패다. 오프셋을 되감아 DLT 를 다시 읽으면 여기로 온다.
-			log.warn("이미 기록된 실패, 건너뜀: topic=$originalTopic partition=$originalPartition offset=$originalOffset")
+			// 유니크 제약 위반 = 같은 그룹의 이미 적어둔 실패다. 오프셋을 되감아 DLT 를 다시 읽으면 여기로 온다.
+			log.warn("이미 기록된 실패, 건너뜀: topic=$originalTopic partition=$originalPartition offset=$originalOffset group=${failed.originalConsumerGroup}")
 		}
 
 		ack.acknowledge()

@@ -28,7 +28,7 @@ docker compose up -d --build        # Kafka + kafka-ui + PostgreSQL + mock-pg
 ## 함정
 
 - 스키마는 `ddl-auto: update` + `schema.sql`(테스트에서도 실행). `@Enumerated(STRING)` 컬럼의 CHECK 제약은 `update` 가 갱신하지 않는다.
-  `PaymentStatus` 는 `schema.sql` 이 값 목록을 고정해 다시 세우므로 enum 에 값을 추가하면 `schema.sql` 목록도 고친다. `OrderStatus`·`FailedEventStatus` 는 다루지 않아 기존 로컬 DB 에서만 거부된다.
+  `PaymentStatus`·`OrderStatus`·`FailedEventStatus` 는 `schema.sql` 이 값 목록을 고정해 다시 세우므로 enum 에 값을 추가하면 `schema.sql` 목록도 고친다(빠뜨리면 `SchemaEnumCheckTest` 가 잡는다). `failed_events` 유니크 제약도 `schema.sql` 이 다시 세운다.
 - compose 브로커는 `KAFKA_AUTO_CREATE_TOPICS_ENABLE=false` 라 없는 토픽은 발행이 실패한다. Testcontainers 브로커는 자동 생성이라 테스트로는 못 잡는다.
 - Ktor 와 Spring Boot BOM 의 코루틴 버전 충돌 때문에 `build.gradle.kts` 가 버전을 올려둔다(주석 참고). 의존성을 올릴 때 확인한다.
 - Kotlin 들여쓰기는 탭. 주석은 "무엇"이 아니라 "왜"를 한국어로 적는다.

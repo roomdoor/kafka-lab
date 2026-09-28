@@ -16,8 +16,28 @@ create unique index if not exists uk_payments_open_order
 
 -- Hibernate 는 @Enumerated(STRING) 컬럼에 값 목록을 CHECK 제약으로 만들어 둔다.
 -- 그런데 `ddl-auto: update` 는 **이미 있는 CHECK 제약을 갱신하지 않는다.**
--- enum 에 값을 추가하면(PENDING 이 그랬다) 새 값이 DB 에서 거부되는데,
--- 테스트는 create-drop 이라 매번 새로 만들어져 이 함정을 못 잡는다. 여기서 다시 세운다.
+-- enum 에 값을 추가하면(PENDING 이 그랬다) 기존 DB 에서만 새 값이 거부된다. 그래서 여기서 다시 세운다.
+-- 이 파일은 테스트에서도 실행되므로, enum 에 값을 추가하고 아래 목록을 빠뜨리면 테스트가 잡는다(SchemaEnumCheckTest).
+-- 대신 목록은 enum 과 손으로 맞춰야 한다. 근본 해결은 Flyway 같은 마이그레이션 도구다.
 alter table payments drop constraint if exists payments_status_check;
 alter table payments add constraint payments_status_check
 	check (status in ('PENDING', 'COMPLETED', 'FAILED'));
+
+alter table orders drop constraint if exists orders_status_check;
+alter table orders add constraint orders_status_check
+	check (status in ('CREATED', 'PAID', 'PAYMENT_FAILED'));
+
+alter table failed_events drop constraint if exists failed_events_status_check;
+alter table failed_events add constraint failed_events_status_check
+	check (status in ('PENDING', 'RETRIED', 'RESOLVED', 'IGNORED'));
+
+-- failed_events 유니크 키에 컨슈머 그룹을 넣는다. order.events 는 두 그룹이 읽어서
+-- 한 레코드가 두 그룹 모두에서 실패하면 좌표가 같은 DLT 레코드가 2건 온다. 그룹이 없으면 두 번째가 버려진다.
+-- 옛 제약은 Hibernate 가 이름 없이 만들어 Postgres 가 붙인 이름이다. `update` 는 이걸 지우지 않는다.
+alter table failed_events drop constraint if exists failed_events_original_topic_original_partition_original_of_key;
+-- NULLS NOT DISTINCT: 그룹 헤더가 없는 레코드(DeadLetterPublishingRecoverer 가 아닌 곳에서 넣은 것)도
+-- 재수신은 한 건으로 합친다. 기본(NULL 끼리 다름)이면 DLT 를 다시 읽을 때마다 행이 늘어난다. PostgreSQL 15+.
+-- @UniqueConstraint 로는 이 옵션을 표현할 수 없어 여기서 다시 세운다.
+alter table failed_events drop constraint if exists uk_failed_events_original_record;
+alter table failed_events add constraint uk_failed_events_original_record
+	unique nulls not distinct (original_topic, original_partition, original_offset, original_consumer_group);

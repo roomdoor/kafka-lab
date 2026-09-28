@@ -95,10 +95,13 @@ docker exec kafka-lab-postgres psql -U kafkalab -d kafkalab -c \
   "select order_id, count(*) from payments where status='COMPLETED' group by 1 having count(*) > 1;"
 ```
 
-`schema.sql` 은 `payments_status_check` 도 다시 세운다. Hibernate 가 `@Enumerated(STRING)` 컬럼에
+`schema.sql` 은 `payments`·`orders`·`failed_events` 의 `status` CHECK 제약도 다시 세운다. Hibernate 가 `@Enumerated(STRING)` 컬럼에
 값 목록을 CHECK 제약으로 만들어 두는데 **`ddl-auto: update` 는 그 제약을 갱신하지 않기 때문**이다.
-enum 에 값을 추가하면 기존 DB 에서만 INSERT 가 거부되고, 테스트는 `create-drop` 이라 이 함정을 못 잡는다.
-`PaymentStatus.PENDING` 을 추가했을 때 실제로 겪은 일이다.
+enum 에 값을 추가하면 기존 DB 에서만 INSERT·UPDATE 가 거부된다. `PaymentStatus.PENDING` 을 추가했을 때 실제로 겪은 일이다.
+`schema.sql` 은 테스트에서도 실행되므로 enum 과 `schema.sql` 의 하드코딩 목록이 어긋나면 테스트가 잡는다.
+그러니 enum 에 값을 추가하면 `schema.sql` 목록도 같이 고친다.
+
+`failed_events` 의 유니크 제약도 같은 이유로 `schema.sql` 이 다시 세운다. 키는 (원본 토픽, 파티션, 오프셋, 컨슈머 그룹)이다.
 
 `processed_events` 를 쓰던 시절의 DB 라면 그 테이블도 남아 있다. `ddl-auto: update` 는 지우지 않는다.
 
