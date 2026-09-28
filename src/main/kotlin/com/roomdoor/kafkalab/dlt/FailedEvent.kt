@@ -38,9 +38,14 @@ enum class FailedEventStatus {
 @Entity
 @Table(
 	name = "failed_events",
-	// 같은 (원본 토픽, 파티션, 오프셋) 은 세상에 하나뿐이다. DLT 를 다시 읽어도 행이 중복되지 않게 막는다.
+	// 같은 그룹의 같은 (원본 토픽, 파티션, 오프셋) 실패는 하나뿐이다. DLT 를 다시 읽어도 행이 중복되지 않게 막는다.
+	// 그룹이 빠지면 한 레코드가 두 그룹에서 실패했을 때 두 번째 그룹의 실패가 중복으로 버려진다.
+	// 실제 제약은 schema.sql 이 NULLS NOT DISTINCT 로 다시 세운다. 여기 선언은 이름과 컬럼을 맞춰두는 용도다.
 	uniqueConstraints = [
-		UniqueConstraint(columnNames = ["original_topic", "original_partition", "original_offset"]),
+		UniqueConstraint(
+			name = "uk_failed_events_original_record",
+			columnNames = ["original_topic", "original_partition", "original_offset", "original_consumer_group"],
+		),
 	],
 )
 class FailedEvent(
