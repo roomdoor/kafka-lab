@@ -64,9 +64,9 @@ class PaymentConsumer(
 		// 그냥 두면 새로 예약하고, PG 가 402 를 재생해 거절 이벤트와 알림이 한 번 더 나간다.
 		// 주문이 아니라 eventId 로 본다. 다른 eventId 는 다른 카드로 다시 시도하는 흐름이라 막으면 안 된다.
 		// 같은 eventId 의 PENDING 이 남아 있으면 건너뛰지 않는다. 그 예약은 이 재배달만 이어받을 수 있어서, 여기서 ack 하면 영영 남는다.
-		// ponytail: 이 조회와 아래 예약 사이에 첫 배달이 거절을 확정하면 틈이 남는다. 막으려면 reserve 의 INSERT 를
-		// "같은 eventId 의 FAILED 가 없을 때만" 조건부로 바꾼다. event_id 유니크 인덱스는 안 된다 — 거절의 재배달이
-		// 23505 를 받아 아래에서 경합으로 오인되고 DLT 로 간다.
+		// ponytail: 이 조회와 아래 예약 사이에 첫 배달이 거절을 확정하면 틈이 남는다. 조건부 INSERT(NOT EXISTS)로는
+		// 못 막는다 — READ COMMITTED 라 상대의 커밋 전 FAILED 가 안 보인다. 막으려면 event_id 유니크 인덱스다.
+		// 그러려면 기존 DB 의 같은 eventId 중복 행을 먼저 정리하고, 아래 23505 처리가 두 제약을 가르게 고친다.
 		if (paymentRepository.existsByEventIdAndStatus(event.eventId, PaymentStatus.FAILED) &&
 			!paymentRepository.existsByEventIdAndStatus(event.eventId, PaymentStatus.PENDING)
 		) {

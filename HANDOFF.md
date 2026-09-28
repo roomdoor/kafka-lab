@@ -42,7 +42,7 @@ create unique index uk_payments_open_order
 	where status in ('PENDING', 'COMPLETED');
 ```
 
-`FAILED`가 빠져 있는 게 의도적이다. 거절된 주문은 한도를 올린 뒤 다시 시도할 수 있어야 한다.
+`FAILED`가 빠져 있는 게 의도적이다. 거절된 주문은 한도를 올린 뒤 다시 시도할 수 있어야 한다(새 eventId 로. 같은 eventId 는 이미 거절된 재배달로 보고 건너뛴다, #11).
 
 **PG 멱등키(`Idempotency-Key`)로는 이 구멍이 안 막힌다.** 키가 `eventId`라서 같은 주문이 다른 eventId로
 발행되면 PG는 별개 결제로 본다. 게다가 mock PG의 `IdempotencyStore`는 조회 후 저장이라 동시 요청에
@@ -190,7 +190,8 @@ select * from payments where status = 'PENDING';   -- 평소엔 비어 있어야
 - **거절 경로의 중복 방어** — 거절 확정 뒤 재배달(같은 eventId)은 건너뛴다(#11). 다만 두 배달이 동시에 달려
   빠른 길 조회와 예약 사이에 한쪽이 거절을 확정하면 `FAILED` 2행 + 알림 2번이 남는다. 그렇게 생긴 같은 eventId 의
   `PENDING` 은 재배달이 이어받는데, PG 가 402 를 재생해 거절 알림이 또 나간다(예약이 영영 남는 것보단 낫다).
-  돈은 안 움직여서 감수했다. 막으려면 `reserve` 의 INSERT 를 "같은 eventId 의 FAILED 가 없을 때만" 으로 바꾼다.
+  돈은 안 움직여서 감수했다. 조건부 INSERT 로는 못 막는다(READ COMMITTED). 막으려면 `event_id` 유니크 인덱스인데,
+  기존 DB 의 중복 행 정리와 `PaymentConsumer` 의 23505 처리가 두 제약을 가르도록 고치는 일이 먼저다.
   다만 승인과 거절이 갈리는 경합은 `OrderStatusProjector`에서 `PAID → PAYMENT_FAILED` 전이를 막아 처리했다
 - **CDC(Debezium)** — 아웃박스 릴레이를 대체할 수 있다. 폴링 지연이 없어지는 대신 운영 요소가 늘어난다
 
