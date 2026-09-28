@@ -33,8 +33,22 @@ alter table failed_events add constraint failed_events_status_check
 
 -- failed_events 유니크 키에 컨슈머 그룹을 넣는다. order.events 는 두 그룹이 읽어서
 -- 한 레코드가 두 그룹 모두에서 실패하면 좌표가 같은 DLT 레코드가 2건 온다. 그룹이 없으면 두 번째가 버려진다.
--- 옛 제약은 Hibernate 가 이름 없이 만들어 Postgres 가 붙인 이름이다. `update` 는 이걸 지우지 않는다.
-alter table failed_events drop constraint if exists failed_events_original_topic_original_partition_original_of_key;
+-- 옛 3컬럼 제약은 이름이 DB 마다 다르다. `update` 로 만든 DB 는 Hibernate 가 붙인 UK<해시>,
+-- create 로 만든 DB(테스트)는 Postgres 가 붙인 failed_events_original_topic_..._key 다. 그래서 컬럼 구성으로 찾아 지운다.
+-- 본문을 $$ 가 아니라 작은따옴표로 감싼 이유: Spring 의 ScriptUtils 는 달러 인용을 몰라 본문 안의 ; 에서 문장을 자른다.
+-- 작은따옴표 안의 ; 는 건너뛴다. 대신 본문 안의 따옴표는 '' 로 두 번 쓴다.
+do '
+declare c text;
+begin
+	for c in
+		select conname from pg_constraint
+		where conrelid = ''failed_events''::regclass and contype = ''u''
+			and (select array_agg(attname::text order by attname) from pg_attribute where attrelid = conrelid and attnum = any(conkey))
+				= array[''original_offset'', ''original_partition'', ''original_topic'']
+	loop
+		execute format(''alter table failed_events drop constraint %I'', c);
+	end loop;
+end';
 -- NULLS NOT DISTINCT: 그룹 헤더가 없는 레코드(DeadLetterPublishingRecoverer 가 아닌 곳에서 넣은 것)도
 -- 재수신은 한 건으로 합친다. 기본(NULL 끼리 다름)이면 DLT 를 다시 읽을 때마다 행이 늘어난다. PostgreSQL 15+.
 -- @UniqueConstraint 로는 이 옵션을 표현할 수 없어 여기서 다시 세운다.

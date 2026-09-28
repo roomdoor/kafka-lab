@@ -67,12 +67,22 @@ class SchemaEnumCheckTest : IntegrationTestBase() {
 
 	/** 행은 첫 값으로 넣어 두고, 첫 값만 허용하는 "옛 제약" 을 만든 뒤 schema.sql 로 복구되는지 본다. */
 	private fun assertAllStatusesAccepted(table: String, id: Long, values: List<String>) {
-		jdbc.execute("alter table $table drop constraint ${table}_status_check")
-		// NOT VALID: 다른 테스트가 남긴 행은 검사하지 않고, 이후 INSERT·UPDATE 에만 적용한다.
-		jdbc.execute("alter table $table add constraint ${table}_status_check check (status in ('${values.first()}')) not valid")
+		val constraint = "${table}_status_check"
+		// 공유 DB 라 옛 제약이 남으면 다른 테스트 리스너가 깨진다. schema.sql 이 복구를 못 해도 원래 정의로 되돌린다.
+		val original = jdbc.queryForObject(
+			"select pg_get_constraintdef(oid) from pg_constraint where conname = ?", String::class.java, constraint,
+		)
+		try {
+			// 옛 제약을 걸고 곧바로 schema.sql 을 돌려 그 사이 창을 줄인다.
+			// NOT VALID: 다른 테스트가 남긴 행은 검사하지 않고, 이후 INSERT·UPDATE 에만 적용한다.
+			jdbc.execute("alter table $table drop constraint $constraint")
+			jdbc.execute("alter table $table add constraint $constraint check (status in ('${values.first()}')) not valid")
+			ResourceDatabasePopulator(ClassPathResource("schema.sql")).execute(dataSource)
 
-		ResourceDatabasePopulator(ClassPathResource("schema.sql")).execute(dataSource)
-
-		values.forEach { jdbc.update("update $table set status = ? where id = ?", it, id) }
+			values.forEach { jdbc.update("update $table set status = ? where id = ?", it, id) }
+		} finally {
+			jdbc.execute("alter table $table drop constraint if exists $constraint")
+			jdbc.execute("alter table $table add constraint $constraint $original")
+		}
 	}
 }
