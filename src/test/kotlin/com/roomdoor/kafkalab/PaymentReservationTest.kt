@@ -248,7 +248,8 @@ class PaymentReservationTest : IntegrationTestBase() {
 	 */
 	@Test
 	fun `같은 eventId 의 PENDING 이 남아 있으면 거절 기록이 있어도 이어받는다`() {
-		val event = orderCreated("order-failed-and-pending-${UUID.randomUUID()}")
+		// 실제로는 같은 키에 PG 가 402 를 재생하므로 거절 금액으로 둔다. 이어받은 예약도 거절로 끝난다.
+		val event = orderCreated("order-failed-and-pending-${UUID.randomUUID()}").copy(amount = 2_000_000)
 		paymentService.declinePayment(paymentService.reserve(event), event, "테스트 거절")
 		val pending = paymentService.reserve(event)
 
@@ -257,7 +258,7 @@ class PaymentReservationTest : IntegrationTestBase() {
 
 		assertTrue(acked)
 		assertEquals(
-			PaymentStatus.COMPLETED,
+			PaymentStatus.FAILED,
 			paymentRepository.findById(pending.id!!).orElse(null)?.status,
 			"거절 기록만 보고 건너뛰면 이 예약이 PENDING 에 갇힌다",
 		)
