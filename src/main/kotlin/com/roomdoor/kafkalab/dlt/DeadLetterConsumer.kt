@@ -2,7 +2,7 @@ package com.roomdoor.kafkalab.dlt
 
 import com.roomdoor.kafkalab.config.Topics
 import org.apache.kafka.clients.consumer.ConsumerRecord
-import org.hibernate.exception.ConstraintViolationException
+import org.hibernate.JDBCException
 import org.slf4j.LoggerFactory
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.kafka.annotation.KafkaListener
@@ -69,8 +69,10 @@ class DeadLetterConsumer(
 			failedEventRepository.save(failed)
 			log.error("처리 실패 기록: topic=$originalTopic partition=$originalPartition offset=$originalOffset group=${failed.originalConsumerGroup} 원인=${failed.exceptionClass}")
 		} catch (e: DataIntegrityViolationException) {
-			// 우리 유니크 제약 위반만 중복이다. 다른 위반(CHECK, NOT NULL 등)까지 삼키면 실패 기록이 소리 없이 사라진다.
-			if ((e.cause as? ConstraintViolationException)?.constraintName != UNIQUE_CONSTRAINT) throw e
+			// 유니크 위반(23505)만 중복이다. 다른 위반(CHECK, NOT NULL 등)까지 삼키면 실패 기록이 소리 없이 사라진다.
+			// 제약 이름은 Hibernate 가 지역화된 에러 메시지에서 뽑아서 lc_messages 가 영어가 아니면 null 이 된다. SQLState 는 언어와 무관하다.
+			// PK 는 identity 라 이 테이블에서 INSERT 가 걸릴 유니크는 uk_failed_events_original_record 하나뿐이다.
+			if ((e.cause as? JDBCException)?.sqlState != UNIQUE_VIOLATION) throw e
 			// 유니크 제약 위반 = 같은 그룹의 이미 적어둔 실패다. 오프셋을 되감아 DLT 를 다시 읽으면 여기로 온다.
 			log.warn("이미 기록된 실패, 건너뜀: topic=$originalTopic partition=$originalPartition offset=$originalOffset group=${failed.originalConsumerGroup}")
 		}
@@ -99,7 +101,7 @@ class DeadLetterConsumer(
 	companion object {
 		const val GROUP_ID = "dead-letter-inspector"
 
-		/** schema.sql 과 [FailedEvent] 의 제약 이름과 같아야 한다. */
-		private const val UNIQUE_CONSTRAINT = "uk_failed_events_original_record"
+		/** PostgreSQL unique_violation */
+		private const val UNIQUE_VIOLATION = "23505"
 	}
 }
