@@ -14,4 +14,7 @@ interface PaymentRepository : JpaRepository<Payment, Long> {
 
 	/** 이미 끝난 주문인지 보는 빠른 길. 처리 중(PENDING)인 경우는 예약 INSERT 가 걸러낸다. */
 	fun countByOrderIdAndStatus(orderId: String, status: PaymentStatus): Long
+
+	/** 예약에 막혔을 때 누가 잡았는지 본다. PENDING 은 인덱스 때문에 주문당 하나뿐이라 단건이다. */
+	fun findByOrderIdAndStatus(orderId: String, status: PaymentStatus): Payment?
 }

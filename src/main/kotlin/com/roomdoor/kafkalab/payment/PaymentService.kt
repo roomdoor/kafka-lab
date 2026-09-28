@@ -35,8 +35,8 @@ class PaymentService(
 ) {
 
 	/**
-	 * 결제 자리를 먼저 잡는다. `uk_payments_open_order` 위반이 나면 다른 쪽이 이미 잡은 것이므로
-	 * 호출자는 PG 를 부르지 않고 물러나야 한다.
+	 * 결제 자리를 먼저 잡는다. `uk_payments_open_order` 위반이 나면 이미 누가 잡은 것이다.
+	 * 잡은 쪽이 다른 eventId 면 호출자는 PG 를 부르지 않고 물러나고, 같은 eventId 면 앞선 시도의 예약이니 이어받는다.
 	 *
 	 * `saveAndFlush` 여야 한다. `save` 만 하면 INSERT 가 커밋 시점까지 미뤄져 제약 위반이
 	 * 이 메서드 밖에서 터진다 — 그때는 이미 PG 를 부른 뒤다.
@@ -47,13 +47,14 @@ class PaymentService(
 			paymentId = UUID.randomUUID().toString(),
 			orderId = event.orderId,
 			amount = event.amount,
+			eventId = event.eventId,
 			status = PaymentStatus.PENDING,
 		)
 	)
 
 	/**
-	 * PG 호출이 예외로 끝났을 때 예약을 되돌린다. 붙잡은 채로 두면 Kafka 재시도가
-	 * 자기가 남긴 예약에 막혀 결제가 영영 안 된다.
+	 * PG 가 결제하지 않은 게 **확실할 때만** 예약을 되돌린다. 그래야 다른 eventId 의 재시도도 결제할 수 있다.
+	 * 결과를 모르는데 풀면 그 사이 다른 eventId 가 새 멱등키로 결제해 이중 결제가 난다.
 	 */
 	@Transactional
 	fun releaseReservation(payment: Payment) = paymentRepository.delete(payment)

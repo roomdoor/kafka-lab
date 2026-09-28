@@ -289,9 +289,15 @@ select order_id, count(*) from payments where status in ('PENDING', 'COMPLETED')
 select * from payments where status = 'PENDING';
 ```
 
-PG 호출이 예외로 끝나면 예약을 지우고 예외를 다시 던진다. 안 지우면 Kafka 재시도가
-자기가 남긴 예약에 막혀 영영 결제되지 않는다. 다만 **호출 도중 프로세스가 죽으면 PENDING 이 남고**
-그 주문은 막힌다. 학습용이라 청소 배치는 두지 않았다 — 위 쿼리로 확인하고 손으로 지우면 된다.
+예약 행에는 `event_id`(= PG 멱등키)가 적힌다. 재배달이 예약에 막혔을 때 **같은 eventId 면 자기 예약**이라
+이어받고 같은 키로 PG 를 다시 부른다. PG 가 처음 결과를 재생하므로 결제는 한 번이다.
+PG 승인 뒤 결과 확정 트랜잭션이 롤백되거나, 호출 도중 프로세스가 죽어도 재배달이 이렇게 마무리한다.
+eventId 가 다른 쪽만 경합으로 보고 물러난다.
+
+PG 호출이 예외로 끝나면 **결제가 안 된 게 확실할 때만**(커넥션 거부, 5xx) 예약을 지운다.
+읽기 타임아웃처럼 결과를 모르면 예약을 쥔 채 재시도로 넘긴다(시나리오 6).
+재시도가 소진되면 PENDING 이 남은 채 DLT 로 간다. DLT 재처리(같은 eventId)는 예약을 이어받아 끝내고,
+그 밖에는 사람이 PG 와 대사해 위 쿼리의 행을 정리한다.
 
 거절은 이 제약 밖이다(`FAILED` 는 인덱스에 없다). 한도를 올린 뒤 다시 흘리면 결제가 새로 시도된다.
 
@@ -312,6 +318,10 @@ curl -X POST http://localhost:9090/_config -H 'Content-Type: application/json' \
 단 **mock-pg 가 그 사이 재기동되지 않았을 때만**이다. 멱등키 저장소가 메모리라 재기동하면 키가 사라지고,
 재처리가 새 결제로 승인된다(위 재처리 절차처럼 `docker compose start mock-pg` 를 거쳤다면 이 경우다).
 `PaymentGatewayClient` 에서 헤더를 빼고 돌려보면 차이가 보인다.
+
+멱등키는 **같은 eventId** 의 재시도만 지켜준다. 그래서 타임아웃 뒤에도 `payments` 의 PENDING 예약을 지우지 않는다.
+지우면 그 사이 같은 주문이 다른 eventId 로 들어와 새 멱등키로 결제한다. 예약이 남아 있으면 그쪽은 물러나고,
+원래 이벤트의 재시도가 자기 예약을 이어받아 처음 결과로 확정한다 (`PaymentReservationTest`).
 
 ### 7. 컨슈머를 늘리면 어디까지 빨라지나
 

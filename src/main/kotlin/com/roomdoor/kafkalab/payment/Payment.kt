@@ -43,6 +43,14 @@ class Payment(
 	@Column(nullable = false)
 	val amount: Long,
 
+	/**
+	 * 이 결제를 시도한 이벤트 ID. PG 멱등키와 같은 값이라 "이 예약 = 이 PG 결제 시도" 로 묶인다.
+	 * 재배달이 예약에 막혔을 때 자기 예약인지(이어받기) 남의 예약인지(물러나기) 이걸로 가른다.
+	 * 이 컬럼이 생기기 전 행은 null 이라 누구의 예약도 아닌 것으로 본다.
+	 */
+	@Column
+	val eventId: String? = null,
+
 	@Enumerated(EnumType.STRING)
 	@Column(nullable = false, length = 32)
 	var status: PaymentStatus,
