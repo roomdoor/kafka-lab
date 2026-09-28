@@ -43,7 +43,8 @@ class DeadLetterConsumer(
 		// 세 좌표는 한 메시지에서 와야 한다. 원본 토픽에 DLT 레코드의 파티션·오프셋을 섞으면 원본 토픽의 엉뚱한 메시지를
 		// 가리키고, 진짜 실패 기록과 유니크 키가 부딪칠 수도 있다. 하나라도 못 읽으면 DLT 레코드 자신의 좌표를 쓴다.
 		val (originalTopic, originalPartition, originalOffset) =
-			if (headerTopic != null && headerPartition != null && headerOffset != null) {
+			// 빈 토픽 헤더도 못 읽은 것으로 본다. 빈 이름으로 기록하면 재발행할 곳이 없다.
+			if (!headerTopic.isNullOrBlank() && headerPartition != null && headerOffset != null) {
 				Triple(headerTopic, headerPartition, headerOffset)
 			} else {
 				Triple(record.topic(), record.partition(), record.offset())

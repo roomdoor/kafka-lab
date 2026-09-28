@@ -113,6 +113,21 @@ class DeadLetterConsumerFailureTest : IntegrationTestBase() {
 		assertEquals(sent.offset(), recorded.originalOffset)
 	}
 
+	@Test
+	fun `빈 원본 토픽 헤더면 세 좌표 모두 DLT 레코드 자신의 것을 쓴다`() {
+		val payload = """{"marker":"${UUID.randomUUID()}"}"""
+		val record = ProducerRecord<String, String>(Topics.ORDER_EVENTS_DLT, "dlt-blank-topic", payload)
+		record.headers().add(KafkaHeaders.DLT_ORIGINAL_TOPIC, " ".toByteArray())
+		record.headers().add(KafkaHeaders.DLT_ORIGINAL_PARTITION, "2".toByteArray())
+		record.headers().add(KafkaHeaders.DLT_ORIGINAL_OFFSET, "4200000043".toByteArray())
+		val sent = kafkaTemplate.send(record).get().recordMetadata
+
+		val recorded = awaitRecorded { it.payload == payload }
+		assertEquals(sent.topic(), recorded.originalTopic)
+		assertEquals(sent.partition(), recorded.originalPartition)
+		assertEquals(sent.offset(), recorded.originalOffset)
+	}
+
 	private fun awaitRecorded(predicate: (FailedEvent) -> Boolean): FailedEvent {
 		var found: FailedEvent? = null
 		await().atMost(Duration.ofSeconds(20)).untilAsserted {

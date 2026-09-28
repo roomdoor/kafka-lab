@@ -22,6 +22,8 @@ import org.springframework.transaction.CannotCreateTransactionException
 import org.springframework.util.backoff.ExponentialBackOff
 import org.springframework.util.backoff.FixedBackOff
 import java.sql.SQLException
+import java.sql.SQLRecoverableException
+import java.sql.SQLTransientException
 
 @Configuration
 class KafkaConsumerConfig {
@@ -110,20 +112,28 @@ class KafkaConsumerConfig {
 	}
 
 	private fun isTransientDbFailure(exception: Throwable): Boolean {
-		val chain = generateSequence(exception) { it.cause }.toList()
+		// cause 가 순환하는 예외도 있어 이미 본 예외가 다시 나오면 멈춘다. 안 그러면 컨슈머 스레드가 여기서 돈다.
+		val chain = mutableListOf<Throwable>()
+		var current: Throwable? = exception
+		while (current != null && chain.none { it === current }) {
+			chain += current
+			current = current.cause
+		}
 		if (chain.any {
 				it is TransientDataAccessException || it is RecoverableDataAccessException ||
-					it is DataAccessResourceFailureException || it is CannotCreateTransactionException
+					it is DataAccessResourceFailureException || it is CannotCreateTransactionException ||
+					it is SQLTransientException || it is SQLRecoverableException
 			}
 		) {
 			return true
 		}
 		// 가장 안쪽 SQLException 의 SQLState 가 드라이버가 준 진짜 원인이다.
-		// 08 연결 오류, 57P0x 서버 종료·재시작, 53 자원 부족, 40001/40P01 직렬화 실패·데드락은 기다리면 풀린다.
+		// 08 연결 오류, 57P0x 서버 종료·재시작, 53 자원 부족, 40001/40P01 직렬화 실패·데드락,
+		// 25006 읽기 전용 트랜잭션(페일오버 중 옛 primary 가 standby 로 내려간 순간)은 기다리면 풀린다.
 		// 42(문법·스키마), 22(데이터) 같은 나머지는 영구 오류라 건너뛴다.
 		val sqlState = chain.filterIsInstance<SQLException>().lastOrNull()?.sqlState ?: return false
 		return sqlState.startsWith("08") || sqlState.startsWith("57P0") || sqlState.startsWith("53") ||
-			sqlState == "40001" || sqlState == "40P01"
+			sqlState == "40001" || sqlState == "40P01" || sqlState == "25006"
 	}
 
 	/**

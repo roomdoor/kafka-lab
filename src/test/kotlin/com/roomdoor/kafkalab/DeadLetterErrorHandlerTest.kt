@@ -14,6 +14,7 @@ import org.springframework.kafka.listener.ListenerExecutionFailedException
 import org.springframework.kafka.listener.MessageListenerContainer
 import org.springframework.orm.jpa.JpaSystemException
 import java.sql.SQLException
+import java.sql.SQLTransientException
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -54,6 +55,18 @@ class DeadLetterErrorHandlerTest {
 	fun `같은 래핑이라도 SQLState 가 문법 오류면 건너뛴다`() {
 		val grammar = JpaSystemException(GenericJDBCException("no such column", SQLException("no such column", "42703")))
 		assertTrue(handle(grammar, offset = 3))
+	}
+
+	@Test
+	fun `페일오버 중 읽기 전용 트랜잭션 오류는 재시도한다`() {
+		val readOnly = JpaSystemException(GenericJDBCException("read-only transaction", SQLException("read-only transaction", "25006")))
+		assertFalse(handle(readOnly, offset = 4))
+	}
+
+	@Test
+	fun `SQLTransientException 은 SQLState 가 없어도 재시도한다`() {
+		val timeout = JpaSystemException(GenericJDBCException("timeout", SQLTransientException("timeout")))
+		assertFalse(handle(timeout, offset = 5))
 	}
 
 	// 스프링은 리스너 예외를 ListenerExecutionFailedException 으로 감싸 넘긴다. 실제와 같게 감싼다.
