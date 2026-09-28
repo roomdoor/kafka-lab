@@ -4,13 +4,13 @@ import com.roomdoor.kafkalab.config.Topics
 import com.roomdoor.kafkalab.order.OrderEvent
 import com.roomdoor.kafkalab.order.OrderEventType
 import org.apache.kafka.clients.consumer.ConsumerRecord
-import org.hibernate.exception.ConstraintViolationException
 import org.slf4j.LoggerFactory
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.kafka.annotation.KafkaListener
 import org.springframework.kafka.support.Acknowledgment
 import org.springframework.stereotype.Component
 import tools.jackson.databind.json.JsonMapper
+import java.sql.SQLException
 
 /**
  * 결제 서비스. `order.events` 를 구독해 주문 생성 이벤트에만 반응한다.
@@ -66,10 +66,12 @@ class PaymentConsumer(
 		val payment = try {
 			paymentService.reserve(event)
 		} catch (e: DataIntegrityViolationException) {
-			// 예약 인덱스 위반만 경합이다. JPA 경유라 DuplicateKeyException 이 아니라 이 예외로 오므로 제약 이름으로 가른다.
+			// 유니크 위반만 경합이다. JPA 경유라 DuplicateKeyException 이 아니라 이 예외로 오므로 SQLState 로 가른다.
+			// 제약 이름은 Postgres 오류 메시지에서 뽑아내 lc_messages 가 영어가 아니면 null 이 된다. SQLState 는 로케일과 무관하다.
+			// payments 의 다른 유니크는 payment_id(랜덤 UUID)뿐이라 23505 면 예약 인덱스 위반이다.
 			// CHECK 제약 위반 같은 스키마 오류까지 경합으로 착각하면 조용히 ack 하고, 그 주문은 결제도 DLT 도 없이 사라진다.
 			// 나머지 위반은 그대로 던져 재시도와 DLT 로 보낸다.
-			if ((e.cause as? ConstraintViolationException)?.constraintName != OPEN_ORDER_INDEX) throw e
+			if ((e.mostSpecificCause as? SQLException)?.sqlState != UNIQUE_VIOLATION) throw e
 
 			// 막았다고 다 남은 아니다. 같은 eventId 의 PENDING 이면 **앞선 배달이 남긴 내 예약**이다 —
 			// PG 호출이 결과 모름으로 끝났거나, 승인 뒤 결과 확정이 롤백된 경우다. 이걸 경합으로 보고 물러나면
@@ -128,7 +130,7 @@ class PaymentConsumer(
 	companion object {
 		const val GROUP_ID = "payment-service"
 
-		/** `schema.sql` 의 부분 유니크 인덱스. 이 이름의 위반만 경합으로 본다. */
-		private const val OPEN_ORDER_INDEX = "uk_payments_open_order"
+		/** Postgres unique_violation. `schema.sql` 의 `uk_payments_open_order` 위반이 이걸로 온다. */
+		private const val UNIQUE_VIOLATION = "23505"
 	}
 }

@@ -7,10 +7,12 @@ import com.roomdoor.kafkalab.outbox.OutboxRepository
 import com.roomdoor.kafkalab.payment.PaymentConsumer
 import com.roomdoor.kafkalab.payment.PaymentGatewayException
 import com.roomdoor.kafkalab.payment.PaymentRepository
+import com.roomdoor.kafkalab.payment.PaymentService
 import com.roomdoor.kafkalab.payment.PaymentStatus
 import com.roomdoor.kafkalab.support.IntegrationTestBase
 import com.roomdoor.mockpg.MockPgConfig
 import org.apache.kafka.clients.consumer.ConsumerRecord
+import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.jdbc.core.JdbcTemplate
@@ -19,8 +21,11 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import kotlin.concurrent.thread
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
@@ -39,6 +44,9 @@ class PaymentReservationTest : IntegrationTestBase() {
 
 	@Autowired
 	private lateinit var paymentRepository: PaymentRepository
+
+	@Autowired
+	private lateinit var paymentService: PaymentService
 
 	@Autowired
 	private lateinit var outboxRepository: OutboxRepository
@@ -113,9 +121,18 @@ class PaymentReservationTest : IntegrationTestBase() {
 
 		// mock 이 첫 요청을 끝내고 결과를 저장할 때까지 기다린다. 그 전에 같은 키로 부르면
 		// mock 이 진행 중인 요청을 몰라 새로 결제한다(#3). 이 테스트가 보려는 것과는 별개의 구멍이다.
-		Thread.sleep(1_500)
+		// 500 만 내게 해두고 같은 키로 물어본다. mock 은 저장된 결과를 500 판정보다 먼저 재생하므로,
+		// 저장 전에는 500(결제·저장 없음), 저장 뒤에는 처음 결과가 온다. 엿보는 동안 결제가 새로 생기지 않는다.
+		configureMockPg(MockPgConfig(failureRate = 1.0))
+		lateinit var firstTransactionId: String
+		await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(200)).until {
+			val (status, transactionId) = askMockPg(original)
+			if (status == 200 && transactionId != null) firstTransactionId = transactionId
+			status == 200
+		}
 
 		// 원래 이벤트의 재시도. 같은 멱등키로 PG 를 다시 불러 처음 결과를 받아 확정해야 한다.
+		// mock 은 여전히 500 모드라, 재생이 아니라 새로 결제하려 했다면 여기서 실패한다.
 		var retryAcked = false
 		paymentConsumer.consume(record(original), Acknowledgment { retryAcked = true })
 
@@ -123,9 +140,41 @@ class PaymentReservationTest : IntegrationTestBase() {
 		val payment = paymentRepository.findTopByOrderIdOrderByIdDesc(original.orderId)
 		assertEquals(PaymentStatus.COMPLETED, payment?.status)
 		assertEquals(
-			replayedTransactionId(original),
+			firstTransactionId,
 			payment?.pgTransactionId,
 			"타임아웃 났던 첫 결제가 기록돼야 한다. 다른 거래번호라면 PG 에서 돈이 두 번 나간 것이다",
+		)
+	}
+
+	/**
+	 * 같은 eventId 배달 둘이 동시에 예약을 이어받은 경우(PG 호출 중 리밸런스로 재배달 등). 둘 다 PG 결과를 받아
+	 * 확정하러 오지만 PENDING → COMPLETED 는 한 번만 일어나야 한다. 두 번 일어나면 완료 이벤트·알림이 두 번 나간다.
+	 */
+	@Test
+	fun `같은 예약을 두 배달이 동시에 확정해도 완료 이벤트는 한 번만 나간다`() {
+		val event = orderCreated("order-double-complete-${UUID.randomUUID()}")
+		val reserved = paymentService.reserve(event)
+
+		// 두 배달이 각자 읽어간 예약. 둘 다 PENDING 을 본 상태로 확정에 들어간다.
+		val copies = List(2) { paymentRepository.findById(reserved.id!!).get() }
+		val start = CountDownLatch(1)
+		val threads = copies.map { copy ->
+			thread {
+				start.await()
+				paymentService.completePayment(copy, event, "pg_same_key_replay")
+			}
+		}
+		start.countDown()
+		threads.forEach { it.join() }
+
+		assertEquals(
+			PaymentStatus.COMPLETED,
+			paymentRepository.findTopByOrderIdOrderByIdDesc(event.orderId)?.status,
+		)
+		assertEquals(
+			1,
+			outboxRepository.findAll().count { it.aggregateId == event.orderId && it.payload.contains("PAYMENT_COMPLETED") },
+			"완료 이벤트는 한 번만 아웃박스에 들어가야 한다",
 		)
 	}
 
@@ -165,14 +214,14 @@ class PaymentReservationTest : IntegrationTestBase() {
 		jdbcTemplate.execute("drop function if exists fail_outbox_insert()")
 	}
 
-	/** 같은 멱등키로 mock 에 다시 물어 처음 결과의 거래번호를 받는다. 저장된 결과는 재생될 뿐 새 결제가 아니다. */
-	private fun replayedTransactionId(event: OrderEvent): String? {
+	/** 같은 멱등키로 mock 에 직접 묻는다. 상태 코드와 거래번호를 돌려준다. */
+	private fun askMockPg(event: OrderEvent): Pair<Int, String?> {
 		val request = HttpRequest.newBuilder(URI.create("http://localhost:$mockPgPort/payments"))
 			.header("Content-Type", "application/json")
 			.header("Idempotency-Key", event.eventId)
 			.POST(HttpRequest.BodyPublishers.ofString("""{"orderId":"${event.orderId}","amount":${event.amount}}"""))
 			.build()
-		val body = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString()).body()
-		return jsonMapper.readTree(body).get("transactionId")?.asString()
+		val response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString())
+		return response.statusCode() to jsonMapper.readTree(response.body()).get("transactionId")?.asString()
 	}
 }

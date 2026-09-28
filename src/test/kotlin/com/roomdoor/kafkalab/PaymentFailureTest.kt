@@ -19,7 +19,6 @@ import org.springframework.beans.factory.annotation.Autowired
 import java.time.Duration
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -47,7 +46,7 @@ class PaymentFailureTest : IntegrationTestBase() {
 
 	@Test
 	fun `게이트웨이 일시 장애는 재시도 후 DLT 로 간다`() {
-		// 항상 500 을 돌려주도록 바꾼다. docker compose stop mock-pg 와 같은 상황이다.
+		// 항상 500 을 돌려주도록 바꾼다. docker compose stop mock-pg(커넥션 거부)와 달리 PG 가 응답은 한 상황이다.
 		configureMockPg(MockPgConfig(failureRate = 1.0))
 
 		val order = orderService.createOrder("customer-outage", amount = 30_000)
@@ -59,7 +58,12 @@ class PaymentFailureTest : IntegrationTestBase() {
 		assertNotNull(dltRecord, "재시도를 소진한 뒤 DLT 에 도착해야 한다")
 
 		// 결제는 확정되지 않았다. 나중에 사람이 DLT 를 보고 재처리해야 하는 상태.
-		assertNull(paymentRepository.findTopByOrderIdOrderByIdDesc(order.orderId), "결제 기록이 남으면 안 된다")
+		// 5xx 는 결제 여부를 모르는 실패라 예약(PENDING)이 남는다. 실패(FAILED)로 굳지도, 예약이 풀리지도 않아야 한다.
+		assertEquals(
+			PaymentStatus.PENDING,
+			paymentRepository.findTopByOrderIdOrderByIdDesc(order.orderId)?.status,
+			"결과를 모르므로 예약을 쥔 채 DLT 로 가야 한다",
+		)
 		assertEquals(
 			OrderStatus.CREATED,
 			orderRepository.findByOrderId(order.orderId)?.status,

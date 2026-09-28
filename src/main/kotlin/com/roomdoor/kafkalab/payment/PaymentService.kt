@@ -61,9 +61,14 @@ class PaymentService(
 
 	@Transactional
 	fun completePayment(payment: Payment, event: OrderEvent, transactionId: String): Payment {
+		// 같은 eventId 의 배달 둘이 동시에 예약을 이어받으면 둘 다 여기 온다(PG 호출 중 리밸런스로 재배달 등).
+		// 엔티티를 save 하면 둘 다 덮어쓰고 완료 이벤트·알림이 두 번 나간다. PENDING 일 때만 바꾸는 조건부 UPDATE 로
+		// 전이를 한 번으로 만든다. 행 락 때문에 늦은 쪽은 앞쪽 커밋을 기다렸다가 0건을 받고, 아웃박스를 쓰지 않는다.
+		if (paymentRepository.finalizePending(payment.id!!, PaymentStatus.COMPLETED, transactionId, null) == 0) {
+			return payment
+		}
 		payment.status = PaymentStatus.COMPLETED
 		payment.pgTransactionId = transactionId
-		paymentRepository.save(payment)
 
 		outboxWriter.write(
 			topic = Topics.ORDER_EVENTS,
@@ -90,9 +95,12 @@ class PaymentService(
 	@Transactional
 	fun declinePayment(payment: Payment, event: OrderEvent, reason: String): Payment {
 		// FAILED 로 내려가면 인덱스 밖으로 빠진다. 그래서 나중에 다시 시도할 수 있다.
+		// 전이를 한 번으로 만드는 이유는 completePayment 와 같다.
+		if (paymentRepository.finalizePending(payment.id!!, PaymentStatus.FAILED, null, reason) == 0) {
+			return payment
+		}
 		payment.status = PaymentStatus.FAILED
 		payment.failureReason = reason
-		paymentRepository.save(payment)
 
 		outboxWriter.write(
 			topic = Topics.ORDER_EVENTS,

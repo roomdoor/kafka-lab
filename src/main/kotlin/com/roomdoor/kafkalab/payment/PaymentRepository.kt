@@ -1,6 +1,8 @@
 package com.roomdoor.kafkalab.payment
 
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Modifying
+import org.springframework.data.jpa.repository.Query
 
 interface PaymentRepository : JpaRepository<Payment, Long> {
 
@@ -17,4 +19,17 @@ interface PaymentRepository : JpaRepository<Payment, Long> {
 
 	/** 예약에 막혔을 때 누가 잡았는지 본다. PENDING 은 인덱스 때문에 주문당 하나뿐이라 단건이다. */
 	fun findByOrderIdAndStatus(orderId: String, status: PaymentStatus): Payment?
+
+	/**
+	 * PENDING 인 예약만 결과로 확정한다. 이미 다른 배달이 확정했으면 0 을 돌려준다.
+	 * "읽고 검사하고 저장" 으로 나누면 두 배달이 나란히 PENDING 을 읽는다. WHERE 절에 조건을 넣어야 DB 가 한 번만 허락한다.
+	 */
+	@Modifying
+	@Query(
+		"""
+		update Payment p set p.status = :status, p.pgTransactionId = :transactionId, p.failureReason = :failureReason
+		where p.id = :id and p.status = com.roomdoor.kafkalab.payment.PaymentStatus.PENDING
+		"""
+	)
+	fun finalizePending(id: Long, status: PaymentStatus, transactionId: String?, failureReason: String?): Int
 }

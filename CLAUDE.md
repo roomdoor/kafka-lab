@@ -21,7 +21,7 @@ docker compose up -d --build        # Kafka + kafka-ui + PostgreSQL + mock-pg
 - 에러 핸들러(`KafkaConsumerConfig`)는 `DeadLetterConsumer` 를 뺀 모든 리스너 공통이다. 백오프 재시도 후 `<topic>.DLT`, `IllegalArgumentException` 등 비재시도 예외는 바로 DLT.
   `DeadLetterConsumer` 는 전용 팩토리(`deadLetterListenerContainerFactory`)라 2차 DLT 가 없다. 일시적 DB 장애(예외 체인의 `TransientDataAccessException`·`SQLTransientException`·`SQLRecoverableException` 등 타입, 또는 가장 안쪽 SQLState 08/57P0/53/40001/40P01/25006 로 판별)만 최대 10분 재시도하고, 영구 DB 오류를 포함한 나머지는 재시도 없이. 어느 쪽이든 끝나면 ERROR 로그 후 건너뜀.
   무한 재시도는 두지 않는다. 재시도 정책이 첫 실패 때 정해져, 같은 예외 클래스로 영구 오류가 이어지면 DLT 가 멈춘다.
-- 결제 결과 분류는 `PaymentGatewayClient` 가 정한다. 2xx + `transactionId` 만 승인, 402 는 예외 없이 거절, 나머지 응답과 통신 실패는 예외 → 재시도 → DLT. 예외는 `outcomeUnknown` 으로 "결제 여부 모름"(타임아웃 등)과 "확실히 안 됨"(커넥션 거부, 5xx)을 가른다.
+- 결제 결과 분류는 `PaymentGatewayClient` 가 정한다. 2xx + `transactionId` 만 승인, 402 는 예외 없이 거절, 나머지 응답과 통신 실패는 예외 → 재시도 → DLT. 예외는 `outcomeUnknown` 으로 "결제 여부 모름"(타임아웃 등)과 "확실히 안 됨"(커넥션 거부뿐, 5xx 도 모름)을 가른다.
 - 결제 중복 방어는 PG 호출 전 `payments` 에 `PENDING` 을 넣고 `schema.sql` 의 부분 유니크 인덱스(`order_id`, PENDING/COMPLETED)로 승자를 정하는 방식이다. 예약 행의 `eventId`(= PG 멱등키)가 같으면 재배달이 자기 예약을 이어받고, 결과를 모르는 PG 실패에서는 예약을 풀지 않는다. 바꾸기 전에 `PaymentConsumer` 전체를 먼저 본다.
 - JPA 경유 유니크 위반은 `DuplicateKeyException` 이 아니라 `DataIntegrityViolationException`(원인 Hibernate `ConstraintViolationException`)으로 온다. 제약 이름으로 가른다.
 - `mock-pg` 는 별도 Gradle 모듈이고 테스트에서만 `testImplementation(project(":mock-pg"))` 로 쓴다. 테스트는 `IntegrationTestBase` 가 같은 JVM 에 띄우고 매번 `MockPgConfig()` 로 되돌린다. `POST /_config` 는 설정 전체를 교체하므로 네 필드를 모두 보낸다.

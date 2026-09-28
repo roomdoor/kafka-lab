@@ -88,7 +88,7 @@ class PaymentGatewayClient(
 			// ResourceAccessException 만 잡으면 안 된다. RestClient 는 상태·헤더를 본문 읽을 때 늦게 읽어서,
 			// 읽기 타임아웃이 ResourceAccessException 이 아닌 RestClientException 으로 감싸져 나온다.
 			//
-			// 커넥션 거부만 "결제 안 됨" 이 확실하다. 요청이 PG 에 닿지도 않았다.
+			// 커넥션 거부만 "결제 안 됨" 이 확실하다. 요청이 PG 에 닿지도 않았다. 이 클래스에서 확정 실패는 이것 하나다.
 			// 읽기 타임아웃·응답 도중 끊김은 PG 가 처리했는지 알 수 없다. 연결 타임아웃도 구분이 어려워 모름으로 둔다.
 			throw PaymentGatewayException(
 				"게이트웨이 통신 실패: orderId=$orderId",
@@ -109,14 +109,12 @@ class PaymentGatewayClient(
 			status.value() == 402 ->
 				PaymentGatewayResult.Declined(body?.reason ?: "결제 거절")
 
-			// 5xx 는 PG 가 "처리 못 했다" 고 답한 것으로 본다. mock-pg 의 500 은 결제 전에 돌려주고 결과도 저장하지 않는다.
-			// 나머지(2xx 인데 거래번호 없음, 409 등)는 결제 여부를 모른다.
-			// ponytail: 5xx 를 일괄 '확정 실패' 로 본다. 앞단 프록시의 502/504 처럼 PG 처리 후에 나는 5xx 가 있으면 모름으로 옮긴다.
+			// 응답이 와도 결제 여부는 모른다(outcomeUnknown 기본값). 5xx 도 마찬가지다 — 앞단 프록시의 502/504 는
+			// PG 가 처리한 뒤에도 나고, 본문이 JSON 이 아니면 위에서 읽기 실패로 빠져 어차피 구분이 흔들린다.
+			// 예약을 쥔 채 재시도하면 같은 키로 다시 묻게 되고, PG 가 결과를 저장하지 않은 실패(mock-pg 의 500)라면
+			// 그 재시도가 새 시도로 처리된다. 풀어서 얻는 건 없고 잃을 수 있는 건 이중 결제다.
 			else ->
-				throw PaymentGatewayException(
-					"게이트웨이 오류 응답: status=$status body=$body",
-					outcomeUnknown = !status.is5xxServerError,
-				)
+				throw PaymentGatewayException("게이트웨이 오류 응답: status=$status body=$body")
 		}
 	}
 }
