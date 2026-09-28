@@ -49,7 +49,7 @@ class SchemaEnumCheckTest : IntegrationTestBase() {
 
 	@Test
 	fun `payments 는 모든 PaymentStatus 를 받는다`() {
-		val payment = Payment(UUID.randomUUID().toString(), UUID.randomUUID().toString(), 1_000, PaymentStatus.entries.first())
+		val payment = Payment(UUID.randomUUID().toString(), UUID.randomUUID().toString(), 1_000, status = PaymentStatus.entries.first())
 		assertAllStatusesAccepted("payments", paymentRepository.save(payment).id!!, PaymentStatus.entries.map { it.name })
 	}
 
