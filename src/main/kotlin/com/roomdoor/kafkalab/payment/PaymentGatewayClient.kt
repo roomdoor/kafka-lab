@@ -6,12 +6,23 @@ import org.springframework.http.HttpStatusCode
 import org.springframework.http.client.SimpleClientHttpRequestFactory
 import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
-import org.springframework.web.client.ResourceAccessException
+import org.springframework.web.client.RestClientException
 import org.springframework.web.client.toEntity
+import java.net.ConnectException
 import java.time.Duration
 
-/** 재시도하면 결과가 달라질 수 있는 실패. 이 예외만 Kafka 재시도로 넘긴다. */
-class PaymentGatewayException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+/**
+ * 재시도하면 결과가 달라질 수 있는 PG 실패. 거절처럼 다시 물어도 같은 결과는 이 예외가 아니라 [PaymentGatewayResult] 로 돌려준다.
+ * (Kafka 에러 핸들러는 IllegalArgumentException 말고는 다 재시도한다. 결제 컨슈머의 IllegalStateException 경로도 재시도에 기댄다.)
+ *
+ * [outcomeUnknown] 이 true 면 PG 가 결제했는지 모른다. 호출자는 예약을 풀면 안 된다 —
+ * 풀면 같은 주문이 다른 멱등키로 다시 결제될 수 있다. 기본값이 true 인 건 모를 때는 모른다고 보는 게 안전해서다.
+ */
+class PaymentGatewayException(
+	message: String,
+	cause: Throwable? = null,
+	val outcomeUnknown: Boolean = true,
+) : RuntimeException(message, cause)
 
 /** 게이트웨이가 내린 **확정** 결과. 승인이든 거절이든 다시 물어봐야 소용없다. */
 sealed interface PaymentGatewayResult {
@@ -74,9 +85,17 @@ class PaymentGatewayClient(
 				// 기본 동작은 4xx/5xx 에서 예외를 던지는 것이다. 상태 코드별로 직접 분류하려고 꺼둔다.
 				.onStatus({ true }) { _, _ -> }
 				.toEntity<GatewayResponse>()
-		} catch (e: ResourceAccessException) {
-			// 커넥션 거부, 읽기 타임아웃 등. 결제가 됐는지 안 됐는지 알 수 없는 상태다.
-			throw PaymentGatewayException("게이트웨이 통신 실패: orderId=$orderId", e)
+		} catch (e: RestClientException) {
+			// ResourceAccessException 만 잡으면 안 된다. RestClient 는 상태·헤더를 본문 읽을 때 늦게 읽어서,
+			// 읽기 타임아웃이 ResourceAccessException 이 아닌 RestClientException 으로 감싸져 나온다.
+			//
+			// 커넥션 거부만 "결제 안 됨" 이 확실하다. 요청이 PG 에 닿지도 않았다. 이 클래스에서 확정 실패는 이것 하나다.
+			// 읽기 타임아웃·응답 도중 끊김은 PG 가 처리했는지 알 수 없다. 연결 타임아웃도 구분이 어려워 모름으로 둔다.
+			throw PaymentGatewayException(
+				"게이트웨이 통신 실패: orderId=$orderId",
+				e,
+				outcomeUnknown = e.rootCause !is ConnectException,
+			)
 		}
 
 		val status: HttpStatusCode = response.statusCode
@@ -91,6 +110,10 @@ class PaymentGatewayClient(
 			status.value() == 402 ->
 				PaymentGatewayResult.Declined(body?.reason ?: "결제 거절")
 
+			// 응답이 와도 결제 여부는 모른다(outcomeUnknown 기본값). 5xx 도 마찬가지다 — 앞단 프록시의 502/504 는
+			// PG 가 처리한 뒤에도 나고, 본문이 JSON 이 아니면 위에서 읽기 실패로 빠져 어차피 구분이 흔들린다.
+			// 예약을 쥔 채 재시도하면 같은 키로 다시 묻게 되고, PG 가 결과를 저장하지 않은 실패(mock-pg 의 500)라면
+			// 그 재시도가 새 시도로 처리된다. 풀어서 얻는 건 없고 잃을 수 있는 건 이중 결제다.
 			else ->
 				throw PaymentGatewayException("게이트웨이 오류 응답: status=$status body=$body")
 		}
