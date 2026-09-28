@@ -14,6 +14,10 @@ create unique index if not exists uk_payments_open_order
 	on payments (order_id)
 	where status in ('PENDING', 'COMPLETED');
 
+-- 컨슈머가 ORDER_CREATED 마다 eventId 로 이미 거절됐는지 본다(#11). 인덱스가 없으면 매번 payments 전체를 훑는다.
+-- 유니크가 아닌 이유: 이미 쌓인 로컬 DB 에 같은 eventId 의 FAILED 가 여러 행일 수 있고, 그러면 기동이 실패한다.
+create index if not exists ix_payments_event_id on payments (event_id);
+
 -- Hibernate 는 @Enumerated(STRING) 컬럼에 값 목록을 CHECK 제약으로 만들어 둔다.
 -- 그런데 `ddl-auto: update` 는 **이미 있는 CHECK 제약을 갱신하지 않는다.**
 -- enum 에 값을 추가하면(PENDING 이 그랬다) 기존 DB 에서만 새 값이 거부된다. 그래서 여기서 다시 세운다.

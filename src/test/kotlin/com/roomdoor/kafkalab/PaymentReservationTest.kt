@@ -242,6 +242,27 @@ class PaymentReservationTest : IntegrationTestBase() {
 		)
 	}
 
+	/**
+	 * 같은 eventId 에 FAILED 와 PENDING 이 함께 있다(두 배달이 동시에 달려 한쪽이 거절, 다른 쪽이 새로 예약한 뒤 결과 모름).
+	 * 그 PENDING 은 같은 eventId 의 재배달만 이어받을 수 있다. "이미 거절됨" 으로 건너뛰면 영영 남는다.
+	 */
+	@Test
+	fun `같은 eventId 의 PENDING 이 남아 있으면 거절 기록이 있어도 이어받는다`() {
+		val event = orderCreated("order-failed-and-pending-${UUID.randomUUID()}")
+		paymentService.declinePayment(paymentService.reserve(event), event, "테스트 거절")
+		val pending = paymentService.reserve(event)
+
+		var acked = false
+		paymentConsumer.consume(record(event), Acknowledgment { acked = true })
+
+		assertTrue(acked)
+		assertEquals(
+			PaymentStatus.COMPLETED,
+			paymentRepository.findById(pending.id!!).orElse(null)?.status,
+			"거절 기록만 보고 건너뛰면 이 예약이 PENDING 에 갇힌다",
+		)
+	}
+
 	private fun orderCreated(orderId: String) = OrderEvent(
 		eventId = UUID.randomUUID().toString(),
 		eventType = OrderEventType.ORDER_CREATED,

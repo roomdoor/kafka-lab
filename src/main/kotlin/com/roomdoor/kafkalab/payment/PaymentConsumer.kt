@@ -17,7 +17,7 @@ import java.sql.SQLException
  *
  * 처리 순서가 중요하다.
  * 1. 관심 없는 이벤트 걸러내기 — 이 컨슈머는 자기가 발행한 PAYMENT_COMPLETED 도 같은 토픽에서 다시 읽는다
- * 2. 이미 결제된 주문인지 조회 — 빠른 길일 뿐이다. 경합은 이 검사로 못 막는다
+ * 2. 이미 결제된 주문인지, 이 이벤트가 이미 거절로 끝났는지 조회 — 빠른 길일 뿐이다. 경합은 이 검사로 못 막는다
  * 3. **PG 호출 전에** PENDING 행으로 자리 예약 — 여기서 DB 제약이 승자를 정한다
  * 4. **트랜잭션 밖에서** 외부 게이트웨이 호출 — 느린 HTTP 를 DB 커넥션 잡은 채로 하지 않는다
  * 5. 예약한 행을 결과로 확정 ([PaymentService])
@@ -63,8 +63,11 @@ class PaymentConsumer(
 		// 같은 이벤트가 이미 거절로 끝났으면 재배달이다(거절 확정 뒤 ack 전에 죽음). FAILED 는 예약 인덱스 밖이라
 		// 그냥 두면 새로 예약하고, PG 가 402 를 재생해 거절 이벤트와 알림이 한 번 더 나간다.
 		// 주문이 아니라 eventId 로 본다. 다른 eventId 는 다른 카드로 다시 시도하는 흐름이라 막으면 안 된다.
+		// 같은 eventId 의 PENDING 이 남아 있으면 건너뛰지 않는다. 그 예약은 이 재배달만 이어받을 수 있어서, 여기서 ack 하면 영영 남는다.
 		// ponytail: 이 조회와 아래 예약 사이에 첫 배달이 거절을 확정하면 틈이 남는다. 막으려면 event_id 유니크 인덱스.
-		if (paymentRepository.countByEventIdAndStatus(event.eventId, PaymentStatus.FAILED) > 0) {
+		if (paymentRepository.countByEventIdAndStatus(event.eventId, PaymentStatus.FAILED) > 0 &&
+			paymentRepository.countByEventIdAndStatus(event.eventId, PaymentStatus.PENDING) == 0L
+		) {
 			log.warn("이미 거절된 이벤트, 건너뜀: eventId=${event.eventId} orderId=${event.orderId}")
 			ack.acknowledge()
 			return

@@ -315,7 +315,8 @@ select * from payments where status = 'PENDING' and event_id is null;
 -- PG 에 결제가 없으면 지워서 주문을 풀어준다: delete from payments where id = ?;
 ```
 
-거절은 이 제약 밖이다(`FAILED` 는 인덱스에 없다). 한도를 올린 뒤 다시 흘리면 결제가 새로 시도된다.
+거절은 이 제약 밖이다(`FAILED` 는 인덱스에 없다). 한도를 올린 뒤 **새 eventId 로** 다시 흘리면 결제가 새로 시도된다.
+같은 레코드(같은 eventId)를 다시 흘리면 이미 거절된 이벤트의 재배달로 보고 건너뛴다(#11).
 
 ### 6. 타임아웃 — 결제됐는지 모르는 상태
 
