@@ -20,6 +20,8 @@ import org.springframework.kafka.listener.DeadLetterPublishingRecoverer
 import org.springframework.kafka.listener.DefaultErrorHandler
 import org.springframework.transaction.CannotCreateTransactionException
 import org.springframework.util.backoff.ExponentialBackOff
+import org.springframework.util.backoff.FixedBackOff
+import java.sql.SQLException
 
 @Configuration
 class KafkaConsumerConfig {
@@ -73,10 +75,10 @@ class KafkaConsumerConfig {
 	 * 발행이 실패하고 복구를 끝없이 다시 시도하느라 DLT 파티션이 멈춘다.
 	 *
 	 * 2차 DLT 는 두지 않는다. DLT 가 마지막 정류장이고, 레코드는 보존 기간 동안 DLT 토픽에 그대로 남아 있다.
-	 * - 일시적인 DB 장애(연결 실패, 트랜잭션 시작 실패, 데드락·타임아웃) → 백오프로 **무한 재시도**.
+	 * - 일시적인 DB 장애(연결 실패·끊김, DB 재시작, 트랜잭션 시작 실패, 데드락·타임아웃) → 백오프로 **무한 재시도**.
 	 *   DB 가 돌아오면 이어서 기록한다. DLT 컨슈머가 멈춰도 업무 컨슈머는 다른 그룹이라 영향이 없고,
 	 *   실패 기록을 건너뛰어 잃는 것보다 늦게 적는 게 낫다.
-	 * - 그 밖의 예외(스키마 불일치 같은 영구 DB 오류, null payload 의 NPE 같은 코드 결함) → 재시도해도 같으므로
+	 * - 그 밖의 예외(스키마 불일치 같은 영구 DB 오류, 코드 결함) → 재시도해도 같으므로
 	 *   ERROR 로 좌표만 남기고 건너뛴다. 이걸 무한 재시도하면 고칠 때까지 DLT 가 다시 멈춘다.
 	 *   좌표로 DLT 토픽에서 다시 찾을 수 있다.
 	 */
@@ -99,16 +101,29 @@ class KafkaConsumerConfig {
 		}
 		factory.setCommonErrorHandler(
 			DefaultErrorHandler(skip, backOff).apply {
-				defaultFalse()
-				addRetryableExceptions(
-					TransientDataAccessException::class.java,
-					RecoverableDataAccessException::class.java,
-					DataAccessResourceFailureException::class.java,
-					CannotCreateTransactionException::class.java,
-				)
+				// 타입만으로는 못 가른다. DB 재시작(57P01)은 JpaSystemException, 커밋 중 끊김은 TransactionSystemException 으로
+				// 감싸여 온다. 그래서 예외마다 백오프를 고른다. 일시 장애가 아니면 재시도 0번 = 바로 건너뜀.
+				setBackOffFunction { _, exception -> if (isTransientDbFailure(exception)) backOff else FixedBackOff(0, 0) }
 			},
 		)
 		return factory
+	}
+
+	private fun isTransientDbFailure(exception: Throwable): Boolean {
+		val chain = generateSequence(exception) { it.cause }.toList()
+		if (chain.any {
+				it is TransientDataAccessException || it is RecoverableDataAccessException ||
+					it is DataAccessResourceFailureException || it is CannotCreateTransactionException
+			}
+		) {
+			return true
+		}
+		// 가장 안쪽 SQLException 의 SQLState 가 드라이버가 준 진짜 원인이다.
+		// 08 연결 오류, 57P0x 서버 종료·재시작, 53 자원 부족, 40001/40P01 직렬화 실패·데드락은 기다리면 풀린다.
+		// 42(문법·스키마), 22(데이터) 같은 나머지는 영구 오류라 건너뛴다.
+		val sqlState = chain.filterIsInstance<SQLException>().lastOrNull()?.sqlState ?: return false
+		return sqlState.startsWith("08") || sqlState.startsWith("57P0") || sqlState.startsWith("53") ||
+			sqlState == "40001" || sqlState == "40P01"
 	}
 
 	/**

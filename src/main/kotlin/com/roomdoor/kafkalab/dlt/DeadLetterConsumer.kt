@@ -37,10 +37,17 @@ class DeadLetterConsumer(
 	)
 	fun consume(record: ConsumerRecord<String, String>, ack: Acknowledgment) {
 		// DeadLetterPublishingRecoverer 가 원본 정보와 예외를 헤더에 담아준다.
-		val originalTopic = record.headerAsString(KafkaHeaders.DLT_ORIGINAL_TOPIC) ?: record.topic()
-		// 파티션·오프셋 헤더는 문자열이 아니라 4/8바이트 정수다. 그냥 String 으로 읽으면 깨진 글자가 나온다.
-		val originalPartition = record.headerAsInt(KafkaHeaders.DLT_ORIGINAL_PARTITION) ?: record.partition()
-		val originalOffset = record.headerAsLong(KafkaHeaders.DLT_ORIGINAL_OFFSET) ?: record.offset()
+		val headerTopic = record.headerAsString(KafkaHeaders.DLT_ORIGINAL_TOPIC)
+		val headerPartition = record.headerAsInt(KafkaHeaders.DLT_ORIGINAL_PARTITION)
+		val headerOffset = record.headerAsLong(KafkaHeaders.DLT_ORIGINAL_OFFSET)
+		// 세 좌표는 한 메시지에서 와야 한다. 원본 토픽에 DLT 레코드의 파티션·오프셋을 섞으면 원본 토픽의 엉뚱한 메시지를
+		// 가리키고, 진짜 실패 기록과 유니크 키가 부딪칠 수도 있다. 하나라도 못 읽으면 DLT 레코드 자신의 좌표를 쓴다.
+		val (originalTopic, originalPartition, originalOffset) =
+			if (headerTopic != null && headerPartition != null && headerOffset != null) {
+				Triple(headerTopic, headerPartition, headerOffset)
+			} else {
+				Triple(record.topic(), record.partition(), record.offset())
+			}
 
 		val failed = FailedEvent(
 			originalTopic = originalTopic,
@@ -48,7 +55,8 @@ class DeadLetterConsumer(
 			originalOffset = originalOffset,
 			originalConsumerGroup = record.headerAsString(KafkaHeaders.DLT_ORIGINAL_CONSUMER_GROUP),
 			messageKey = record.key(),
-			payload = record.value(),
+			// tombstone(null 값)도 실패는 실패다. null 로 두면 NPE 로 기록이 건너뛰어진다.
+			payload = record.value() ?: "",
 			// 진짜 원인은 cause 쪽에 있다. 스프링이 리스너 예외를 ListenerExecutionFailedException 으로 감싸기 때문이다.
 			exceptionClass = record.headerAsString(KafkaHeaders.DLT_EXCEPTION_CAUSE_FQCN)
 				?: record.headerAsString(KafkaHeaders.DLT_EXCEPTION_FQCN),
@@ -69,13 +77,20 @@ class DeadLetterConsumer(
 	private fun ConsumerRecord<String, String>.headerAsString(name: String): String? =
 		headers().lastHeader(name)?.value()?.toString(Charsets.UTF_8)
 
-	// kafka-ui 나 스프링이 아닌 프로듀서로 재발행하면 문자열 헤더가 올 수 있다. 길이가 안 맞으면 읽지 않고
-	// 레코드 자신의 좌표로 대신한다. 여기서 던지면 기록 자체가 건너뛰어진다.
-	private fun ConsumerRecord<String, String>.headerAsInt(name: String): Int? =
-		headers().lastHeader(name)?.value()?.takeIf { it.size == Int.SIZE_BYTES }?.let { ByteBuffer.wrap(it).int }
+	// 스프링은 파티션·오프셋을 4/8바이트 정수로 쓰지만, kafka-ui 나 스프링이 아닌 프로듀서로 재발행하면 "2" 같은 문자열이 온다.
+	// 문자열부터 본다. 숫자 글자만으로 된 바이너리 정수는 파티션 8억·오프셋 3×10^18 이상이라 현실에 없다.
+	// 둘 다 아니면 null — 여기서 던지면 기록 자체가 건너뛰어진다.
+	private fun ConsumerRecord<String, String>.headerAsInt(name: String): Int? {
+		val bytes = headers().lastHeader(name)?.value() ?: return null
+		return bytes.toString(Charsets.UTF_8).toIntOrNull()
+			?: bytes.takeIf { it.size == Int.SIZE_BYTES }?.let { ByteBuffer.wrap(it).int }
+	}
 
-	private fun ConsumerRecord<String, String>.headerAsLong(name: String): Long? =
-		headers().lastHeader(name)?.value()?.takeIf { it.size == Long.SIZE_BYTES }?.let { ByteBuffer.wrap(it).long }
+	private fun ConsumerRecord<String, String>.headerAsLong(name: String): Long? {
+		val bytes = headers().lastHeader(name)?.value() ?: return null
+		return bytes.toString(Charsets.UTF_8).toLongOrNull()
+			?: bytes.takeIf { it.size == Long.SIZE_BYTES }?.let { ByteBuffer.wrap(it).long }
+	}
 
 	companion object {
 		const val GROUP_ID = "dead-letter-inspector"
