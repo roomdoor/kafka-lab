@@ -32,4 +32,9 @@ interface PaymentRepository : JpaRepository<Payment, Long> {
 		"""
 	)
 	fun finalizePending(id: Long, status: PaymentStatus, transactionId: String?, failureReason: String?): Int
+
+	/** PENDING 인 예약만 지운다. 같은 eventId 의 다른 배달이 먼저 확정한 결과를 지우지 않으려는 것이다. */
+	@Modifying
+	@Query("delete from Payment p where p.id = :id and p.status = com.roomdoor.kafkalab.payment.PaymentStatus.PENDING")
+	fun deletePending(id: Long): Int
 }

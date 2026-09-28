@@ -24,10 +24,12 @@ import java.net.http.HttpResponse
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import kotlin.concurrent.thread
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
@@ -106,13 +108,16 @@ class PaymentReservationTest : IntegrationTestBase() {
 
 		// 버그성 재발행·수동 발행 등으로 같은 주문이 다른 eventId 로 들어온다. PG 는 이제 정상이다.
 		configureMockPg(MockPgConfig())
+		// PG 를 부르지 않고 던져야 한다. ack 하고 버리면 저 PENDING 이 주인 없이 남았을 때 이 이벤트가 흔적 없이 사라진다.
 		var competitorAcked = false
-		paymentConsumer.consume(
-			record(original.copy(eventId = UUID.randomUUID().toString())),
-			Acknowledgment { competitorAcked = true },
-		)
+		assertFailsWith<IllegalStateException> {
+			paymentConsumer.consume(
+				record(original.copy(eventId = UUID.randomUUID().toString())),
+				Acknowledgment { competitorAcked = true },
+			)
+		}
 
-		assertTrue(competitorAcked, "경합으로 보고 물러나야 한다")
+		assertFalse(competitorAcked, "재시도·DLT 로 넘어가야 하므로 ack 하면 안 된다")
 		assertEquals(
 			0,
 			paymentRepository.countByOrderIdAndStatus(original.orderId, PaymentStatus.COMPLETED),
@@ -158,14 +163,19 @@ class PaymentReservationTest : IntegrationTestBase() {
 		// 두 배달이 각자 읽어간 예약. 둘 다 PENDING 을 본 상태로 확정에 들어간다.
 		val copies = List(2) { paymentRepository.findById(reserved.id!!).get() }
 		val start = CountDownLatch(1)
+		// thread{} 안의 예외는 테스트 스레드로 올라오지 않는다. 모아서 확인해야 조용한 실패를 놓치지 않는다.
+		val errors = ConcurrentLinkedQueue<Throwable>()
 		val threads = copies.map { copy ->
 			thread {
 				start.await()
-				paymentService.completePayment(copy, event, "pg_same_key_replay")
+				runCatching { paymentService.completePayment(copy, event, "pg_same_key_replay") }
+					.onFailure { errors += it }
 			}
 		}
 		start.countDown()
 		threads.forEach { it.join() }
+
+		assertTrue(errors.isEmpty(), "같은 결과로 이미 확정된 건 오류가 아니다: $errors")
 
 		assertEquals(
 			PaymentStatus.COMPLETED,
@@ -176,6 +186,21 @@ class PaymentReservationTest : IntegrationTestBase() {
 			outboxRepository.findAll().count { it.aggregateId == event.orderId && it.payload.contains("PAYMENT_COMPLETED") },
 			"완료 이벤트는 한 번만 아웃박스에 들어가야 한다",
 		)
+	}
+
+	/**
+	 * 예약 해제는 예약 시점의 사본을 들고 온다. 그 사이 같은 eventId 의 다른 배달이 확정했다면
+	 * 사본대로 지우는 순간 결제 기록이 사라진다. PENDING 일 때만 지워야 한다.
+	 */
+	@Test
+	fun `이미 확정된 결제는 늦게 온 예약 해제로 지워지지 않는다`() {
+		val event = orderCreated("order-late-release-${UUID.randomUUID()}")
+		val stale = paymentService.reserve(event)
+		paymentService.completePayment(paymentRepository.findById(stale.id!!).get(), event, "pg_other_delivery")
+
+		paymentService.releaseReservation(stale)
+
+		assertEquals(PaymentStatus.COMPLETED, paymentRepository.findById(stale.id!!).orElse(null)?.status)
 	}
 
 	private fun orderCreated(orderId: String) = OrderEvent(

@@ -63,6 +63,8 @@ class PaymentConsumer(
 		// 자리를 먼저 잡는다. 위의 조회는 빠른 길일 뿐 경합을 막지 못한다 —
 		// 같은 주문이 다른 파티션에 실려 오거나 리밸런스 중이면 두 스레드가 나란히 통과한다.
 		// PG 호출 **전에** DB 제약으로 승자를 정해야 진 쪽이 결제를 못 한다.
+		// 이어받은 예약인지. 앞선 시도가 결과 모름으로 끝났을 수 있으므로 이어받은 예약은 어떤 실패에도 풀지 않는다.
+		var takenOver = false
 		val payment = try {
 			paymentService.reserve(event)
 		} catch (e: DataIntegrityViolationException) {
@@ -79,13 +81,15 @@ class PaymentConsumer(
 			// 같은 멱등키로 PG 를 다시 부르면 PG 가 처음 결과를 재생하므로 이어받아도 이중 결제가 없다.
 			val mine = paymentRepository.findByOrderIdAndStatus(event.orderId, PaymentStatus.PENDING)
 				?.takeIf { it.eventId == event.eventId }
+			// 다른 eventId 가 잡았다. PG 는 부르지 않지만 ack 하고 버리지도 않는다. 그 PENDING 은 결과 모름으로
+			// DLT 에 간 채 주인 없이 남은 것일 수 있어서, 버리면 이 이벤트는 흔적 없이 사라진다.
+			// 던져서 재시도시킨다. 그 사이 상대가 끝내면 재시도는 위의 COMPLETED 조회에 걸려 건너뛰고,
+			// 끝까지 PENDING 이면 DLT 로 가서 사람이 볼 수 있게 남는다.
 			if (mine == null) {
-				// 다른 eventId 가 잡았다. 그쪽이 끝까지 처리하므로 여기서는 물러난다.
-				log.warn("처리 중인 주문, 건너뜀: eventId=${event.eventId} orderId=${event.orderId}")
-				ack.acknowledge()
-				return
+				throw IllegalStateException("다른 eventId 가 결제 중인 주문: eventId=${event.eventId} orderId=${event.orderId}")
 			}
 			log.info("앞선 시도의 예약을 이어받음: eventId=${event.eventId} orderId=${event.orderId}")
+			takenOver = true
 			mine
 		}
 
@@ -104,7 +108,8 @@ class PaymentConsumer(
 			// 예약은 PG 가 결제하지 않은 게 확실할 때만 푼다. 결과를 모르는데 풀면 그 사이(백오프 중, DLT 로 간 뒤)
 			// 같은 주문이 다른 eventId 로 들어와 새 멱등키로 결제한다 — 이중 결제다.
 			// 쥔 채로 넘겨도 재시도는 같은 eventId 라 위에서 자기 예약을 이어받는다.
-			val release = e is PaymentGatewayException && !e.outcomeUnknown
+			// 이어받은 예약은 이번 실패가 확실해도 풀지 않는다. 앞선 시도가 이미 결제했을 수 있다.
+			val release = !takenOver && e is PaymentGatewayException && !e.outcomeUnknown
 			log.warn("PG 호출 실패, ${if (release) "예약 해제" else "예약 유지"} 후 재시도로 넘김: orderId=${event.orderId} (${e.javaClass.simpleName}: ${e.message})")
 			if (release) paymentService.releaseReservation(payment)
 			throw e
