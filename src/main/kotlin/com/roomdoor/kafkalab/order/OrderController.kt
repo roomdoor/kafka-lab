@@ -47,7 +47,7 @@ class OrderController(
 	 */
 	data class CreateOrderRequest(
 		@field:Schema(
-			description = "고객 ID. 알림 토픽의 파티션 키다. 빼거나 null 이면 c-0 ~ c-100 중 하나가 들어간다. `FAIL` 을 주면 결제 컨슈머가 실패하도록 만들어져 있다.",
+			description = "고객 ID. 알림 토픽의 파티션 키다. 빼거나 null 이면 c-0 ~ c-100 중 하나가 들어간다.",
 			example = "c-1",
 			nullable = true,
 		)
