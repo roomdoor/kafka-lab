@@ -2,9 +2,12 @@ package com.roomdoor.kafkalab.support
 
 import com.roomdoor.mockpg.MockPgConfig
 import com.roomdoor.mockpg.startMockPaymentGateway
+import org.apache.kafka.clients.admin.AdminClient
+import org.apache.kafka.clients.admin.AdminClientConfig
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.clients.consumer.KafkaConsumer
+import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
@@ -95,6 +98,12 @@ abstract class IntegrationTestBase {
 			return collected
 		}
 	}
+
+	/** 그룹이 이 파티션에 커밋한 오프셋(= 다음에 읽을 위치). 커밋이 없으면 -1. */
+	protected fun committedOffset(groupId: String, partition: TopicPartition): Long =
+		AdminClient.create(mapOf<String, Any>(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG to kafka.bootstrapServers)).use {
+			it.listConsumerGroupOffsets(groupId).partitionsToOffsetAndMetadata().get()[partition]?.offset() ?: -1
+		}
 
 	companion object {
 

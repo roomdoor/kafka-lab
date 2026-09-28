@@ -6,7 +6,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.kafka.annotation.KafkaListener
 import org.springframework.kafka.support.Acknowledgment
 import org.springframework.stereotype.Component
-import org.springframework.transaction.annotation.Transactional
+import org.springframework.transaction.support.TransactionTemplate
 import tools.jackson.databind.json.JsonMapper
 
 /**
@@ -30,13 +30,20 @@ import tools.jackson.databind.json.JsonMapper
 class OrderStatusProjector(
 	private val jsonMapper: JsonMapper,
 	private val orderRepository: OrderRepository,
+	private val transactionTemplate: TransactionTemplate,
 ) {
 
 	private val log = LoggerFactory.getLogger(javaClass)
 
 	@KafkaListener(topics = [Topics.ORDER_EVENTS], groupId = GROUP_ID)
-	@Transactional
 	fun consume(record: ConsumerRecord<String, String>, ack: Acknowledgment) {
+		// @Transactional 이면 ack 가 트랜잭션 안에서 불려 오프셋이 DB 커밋보다 먼저 나간다(UPDATE 는 커밋 때 flush).
+		// 트랜잭션을 여기서 닫고 난 뒤 ack 한다. 커밋 후 ack 전에 죽으면 재전달되지만, 이 투영은 자연 멱등이라 괜찮다.
+		transactionTemplate.executeWithoutResult { project(record) }
+		ack.acknowledge()
+	}
+
+	private fun project(record: ConsumerRecord<String, String>) {
 		val event = jsonMapper.readValue(record.value(), OrderEvent::class.java)
 
 		val newStatus = when (event.eventType) {
@@ -60,8 +67,6 @@ class OrderStatusProjector(
 				log.info("주문 상태 갱신: orderId=${event.orderId} → $newStatus partition=${record.partition()} offset=${record.offset()}")
 			}
 		}
-
-		ack.acknowledge()
 	}
 
 	companion object {

@@ -7,14 +7,23 @@ import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.dao.DataAccessResourceFailureException
+import org.springframework.dao.RecoverableDataAccessException
+import org.springframework.dao.TransientDataAccessException
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory
 import org.springframework.kafka.core.ConsumerFactory
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory
 import org.springframework.kafka.core.KafkaTemplate
+import org.springframework.kafka.listener.ConsumerRecordRecoverer
 import org.springframework.kafka.listener.ContainerProperties
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer
 import org.springframework.kafka.listener.DefaultErrorHandler
+import org.springframework.transaction.CannotCreateTransactionException
 import org.springframework.util.backoff.ExponentialBackOff
+import org.springframework.util.backoff.FixedBackOff
+import java.sql.SQLException
+import java.sql.SQLRecoverableException
+import java.sql.SQLTransientException
 
 @Configuration
 class KafkaConsumerConfig {
@@ -61,6 +70,72 @@ class KafkaConsumerConfig {
 
 		factory.setCommonErrorHandler(deadLetterErrorHandler(kafkaTemplate))
 		return factory
+	}
+
+	/**
+	 * DLT 리스너 전용. 기본 팩토리를 쓰면 실패가 `<topic>.DLT.DLT` 로 가는데, 그 토픽은 없어서(자동 생성 꺼짐)
+	 * 발행이 실패하고 복구를 끝없이 다시 시도하느라 DLT 파티션이 멈춘다.
+	 *
+	 * 2차 DLT 는 두지 않는다. DLT 가 마지막 정류장이고, 레코드는 보존 기간 동안 DLT 토픽에 그대로 남아 있다.
+	 * - 일시적인 DB 장애(연결 실패·끊김, DB 재시작, 페일오버 중 읽기 전용, 트랜잭션 시작 실패, 데드락·타임아웃)
+	 *   → 백오프로 **최대 10분** 재시도. 보통의 재시작·페일오버는 그 안에 끝나 이어서 기록한다.
+	 *   무한으로 두지 않는 이유: 재시도 정책은 레코드의 첫 실패 때 정해지고, 예외 클래스가 바뀌어야 다시 정해진다.
+	 *   같은 JpaSystemException 안에서 57P01(일시) 뒤에 42703(영구)이 오거나, 읽기 전용 replica 에 잘못 붙어
+	 *   25006 이 계속 나면 무한 재시도가 끝나지 않고 DLT 가 다시 멈춘다.
+	 * - 그 밖의 예외(스키마 불일치 같은 영구 DB 오류, 코드 결함) → 재시도해도 같으므로 바로 건너뛴다.
+	 * - 건너뛸 때는 ERROR 로 좌표를 남긴다. 레코드는 DLT 토픽에 남아 있어 좌표로 다시 찾을 수 있다.
+	 */
+	@Bean
+	fun deadLetterListenerContainerFactory(
+		consumerFactory: ConsumerFactory<String, String>,
+	): ConcurrentKafkaListenerContainerFactory<String, String> {
+		val factory = ConcurrentKafkaListenerContainerFactory<String, String>()
+		factory.setConsumerFactory(consumerFactory)
+		factory.containerProperties.ackMode = ContainerProperties.AckMode.MANUAL_IMMEDIATE
+
+		val skip = ConsumerRecordRecoverer { record, exception ->
+			log.error("DLT 기록 실패, 건너뜀: topic=${record.topic()} partition=${record.partition()} offset=${record.offset()}", exception)
+		}
+		// 1초에서 시작해 최대 30초 간격으로, 대기 시간 합이 10분에 이를 때까지 시도한다. DB 장애 동안 1초마다 두들기지 않게.
+		val backOff = ExponentialBackOff().apply {
+			initialInterval = 1_000
+			multiplier = 2.0
+			maxInterval = 30_000
+			maxElapsedTime = 600_000
+		}
+		factory.setCommonErrorHandler(
+			DefaultErrorHandler(skip, backOff).apply {
+				// 타입만으로는 못 가른다. DB 재시작(57P01)은 JpaSystemException, 커밋 중 끊김은 TransactionSystemException 으로
+				// 감싸여 온다. 그래서 예외마다 백오프를 고른다. 일시 장애가 아니면 재시도 0번 = 바로 건너뜀.
+				setBackOffFunction { _, exception -> if (isTransientDbFailure(exception)) backOff else FixedBackOff(0, 0) }
+			},
+		)
+		return factory
+	}
+
+	private fun isTransientDbFailure(exception: Throwable): Boolean {
+		// cause 가 순환하는 예외도 있어 이미 본 예외가 다시 나오면 멈춘다. 안 그러면 컨슈머 스레드가 여기서 돈다.
+		val chain = mutableListOf<Throwable>()
+		var current: Throwable? = exception
+		while (current != null && chain.none { it === current }) {
+			chain += current
+			current = current.cause
+		}
+		if (chain.any {
+				it is TransientDataAccessException || it is RecoverableDataAccessException ||
+					it is DataAccessResourceFailureException || it is CannotCreateTransactionException ||
+					it is SQLTransientException || it is SQLRecoverableException
+			}
+		) {
+			return true
+		}
+		// 가장 안쪽 SQLException 의 SQLState 가 드라이버가 준 진짜 원인이다.
+		// 08 연결 오류, 57P0x 서버 종료·재시작, 53 자원 부족, 40001/40P01 직렬화 실패·데드락,
+		// 25006 읽기 전용 트랜잭션(페일오버 중 옛 primary 가 standby 로 내려간 순간)은 기다리면 풀린다.
+		// 42(문법·스키마), 22(데이터) 같은 나머지는 영구 오류라 건너뛴다.
+		val sqlState = chain.filterIsInstance<SQLException>().lastOrNull()?.sqlState ?: return false
+		return sqlState.startsWith("08") || sqlState.startsWith("57P0") || sqlState.startsWith("53") ||
+			sqlState == "40001" || sqlState == "40P01" || sqlState == "25006"
 	}
 
 	/**
