@@ -77,12 +77,13 @@ class KafkaConsumerConfig {
 	 * 발행이 실패하고 복구를 끝없이 다시 시도하느라 DLT 파티션이 멈춘다.
 	 *
 	 * 2차 DLT 는 두지 않는다. DLT 가 마지막 정류장이고, 레코드는 보존 기간 동안 DLT 토픽에 그대로 남아 있다.
-	 * - 일시적인 DB 장애(연결 실패·끊김, DB 재시작, 트랜잭션 시작 실패, 데드락·타임아웃) → 백오프로 **무한 재시도**.
-	 *   DB 가 돌아오면 이어서 기록한다. DLT 컨슈머가 멈춰도 업무 컨슈머는 다른 그룹이라 영향이 없고,
-	 *   실패 기록을 건너뛰어 잃는 것보다 늦게 적는 게 낫다.
-	 * - 그 밖의 예외(스키마 불일치 같은 영구 DB 오류, 코드 결함) → 재시도해도 같으므로
-	 *   ERROR 로 좌표만 남기고 건너뛴다. 이걸 무한 재시도하면 고칠 때까지 DLT 가 다시 멈춘다.
-	 *   좌표로 DLT 토픽에서 다시 찾을 수 있다.
+	 * - 일시적인 DB 장애(연결 실패·끊김, DB 재시작, 페일오버 중 읽기 전용, 트랜잭션 시작 실패, 데드락·타임아웃)
+	 *   → 백오프로 **최대 10분** 재시도. 보통의 재시작·페일오버는 그 안에 끝나 이어서 기록한다.
+	 *   무한으로 두지 않는 이유: 재시도 정책은 레코드의 첫 실패 때 정해지고, 예외 클래스가 바뀌어야 다시 정해진다.
+	 *   같은 JpaSystemException 안에서 57P01(일시) 뒤에 42703(영구)이 오거나, 읽기 전용 replica 에 잘못 붙어
+	 *   25006 이 계속 나면 무한 재시도가 끝나지 않고 DLT 가 다시 멈춘다.
+	 * - 그 밖의 예외(스키마 불일치 같은 영구 DB 오류, 코드 결함) → 재시도해도 같으므로 바로 건너뛴다.
+	 * - 건너뛸 때는 ERROR 로 좌표를 남긴다. 레코드는 DLT 토픽에 남아 있어 좌표로 다시 찾을 수 있다.
 	 */
 	@Bean
 	fun deadLetterListenerContainerFactory(
@@ -95,11 +96,12 @@ class KafkaConsumerConfig {
 		val skip = ConsumerRecordRecoverer { record, exception ->
 			log.error("DLT 기록 실패, 건너뜀: topic=${record.topic()} partition=${record.partition()} offset=${record.offset()}", exception)
 		}
-		// 1초에서 시작해 최대 30초 간격으로 계속 시도한다. DB 장애 동안 1초마다 두들기지 않게.
+		// 1초에서 시작해 최대 30초 간격으로, 대기 시간 합이 10분에 이를 때까지 시도한다. DB 장애 동안 1초마다 두들기지 않게.
 		val backOff = ExponentialBackOff().apply {
 			initialInterval = 1_000
 			multiplier = 2.0
 			maxInterval = 30_000
+			maxElapsedTime = 600_000
 		}
 		factory.setCommonErrorHandler(
 			DefaultErrorHandler(skip, backOff).apply {

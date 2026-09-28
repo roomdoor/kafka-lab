@@ -69,6 +69,20 @@ class DeadLetterErrorHandlerTest {
 		assertFalse(handle(timeout, offset = 5))
 	}
 
+	@Test
+	fun `일시 장애 뒤 같은 예외 클래스의 영구 오류가 이어져도 결국 건너뛴다`() {
+		// 재시도 정책은 첫 실패(57P01) 때 정해지고, 예외 클래스가 같으면 42703 이 와도 다시 정해지지 않는다.
+		// 무한 재시도였다면 여기서 영원히 false 다.
+		val restart = JpaSystemException(GenericJDBCException("terminating connection", SQLException("terminating connection", "57P01")))
+		val grammar = JpaSystemException(GenericJDBCException("no such column", SQLException("no such column", "42703")))
+		assertFalse(handle(restart, offset = 7))
+
+		// 한도는 벽시계가 아니라 백오프 간격의 합(10분)으로 잰다. mock 컨테이너는 멈춘 상태라 대기가 바로 끝난다.
+		// 1+2+4+8+16 초 뒤로 30초씩이면 25번 안쪽에서 한도에 닿는다.
+		val skipped = (1..100).any { handle(grammar, offset = 7) }
+		assertTrue(skipped, "재시도 한도가 끝나면 건너뛰어야 한다")
+	}
+
 	// 스프링은 리스너 예외를 ListenerExecutionFailedException 으로 감싸 넘긴다. 실제와 같게 감싼다.
 	private fun handle(cause: Exception, offset: Long): Boolean =
 		handler.handleOne(
