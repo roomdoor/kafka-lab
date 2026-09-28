@@ -61,8 +61,8 @@ class PaymentGatewayClient(
 
 	/**
 	 * @param idempotencyKey 이벤트 ID 를 그대로 쓴다. 타임아웃 후 재시도할 때 게이트웨이가
-	 *   "아까 그 요청" 임을 알아보고 결제를 또 하지 않고 처음 결과를 돌려준다.
-	 *   이 헤더가 없으면 타임아웃 한 번에 이중 결제가 난다.
+	 *   "아까 그 요청" 임을 알아보고 결제를 또 하지 않는다. 처음 요청이 아직 처리 중이면 409 를 받고
+	 *   (예외 → 재시도), 끝난 뒤에는 처음 결과를 돌려받는다. 이 헤더가 없으면 타임아웃 한 번에 이중 결제가 난다.
 	 */
 	fun requestPayment(idempotencyKey: String, orderId: String, amount: Long): PaymentGatewayResult {
 		val response = try {
