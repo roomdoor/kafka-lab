@@ -69,11 +69,13 @@ class DeadLetterConsumer(
 	private fun ConsumerRecord<String, String>.headerAsString(name: String): String? =
 		headers().lastHeader(name)?.value()?.toString(Charsets.UTF_8)
 
+	// kafka-ui 나 스프링이 아닌 프로듀서로 재발행하면 문자열 헤더가 올 수 있다. 길이가 안 맞으면 읽지 않고
+	// 레코드 자신의 좌표로 대신한다. 여기서 던지면 기록 자체가 건너뛰어진다.
 	private fun ConsumerRecord<String, String>.headerAsInt(name: String): Int? =
-		headers().lastHeader(name)?.value()?.let { ByteBuffer.wrap(it).int }
+		headers().lastHeader(name)?.value()?.takeIf { it.size == Int.SIZE_BYTES }?.let { ByteBuffer.wrap(it).int }
 
 	private fun ConsumerRecord<String, String>.headerAsLong(name: String): Long? =
-		headers().lastHeader(name)?.value()?.let { ByteBuffer.wrap(it).long }
+		headers().lastHeader(name)?.value()?.takeIf { it.size == Long.SIZE_BYTES }?.let { ByteBuffer.wrap(it).long }
 
 	companion object {
 		const val GROUP_ID = "dead-letter-inspector"

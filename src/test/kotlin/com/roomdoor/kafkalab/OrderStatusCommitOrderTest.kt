@@ -61,6 +61,9 @@ class OrderStatusCommitOrderTest : IntegrationTestBase() {
 
 		dataSource.connection.use { lock ->
 			lock.autoCommit = false
+			val holderPid = lock.createStatement().use { st ->
+				st.executeQuery("select pg_backend_pid()").use { it.next(); it.getInt(1) }
+			}
 			lock.prepareStatement("select 1 from orders where order_id = ? for update").use {
 				it.setString(1, order.orderId)
 				it.executeQuery()
@@ -71,7 +74,7 @@ class OrderStatusCommitOrderTest : IntegrationTestBase() {
 			partition = TopicPartition(sent.topic(), sent.partition())
 			offset = sent.offset()
 
-			await().atMost(Duration.ofSeconds(20)).until { updateWaitingOnLock() }
+			await().atMost(Duration.ofSeconds(20)).until { updateBlockedBy(holderPid) }
 
 			assertTrue(
 				committedOffset(OrderStatusProjector.GROUP_ID, partition) <= offset,
@@ -88,9 +91,11 @@ class OrderStatusCommitOrderTest : IntegrationTestBase() {
 		}
 	}
 
-	private fun updateWaitingOnLock(): Boolean =
+	// 이 테스트의 락 때문에 막힌 UPDATE 만 센다. 다른 세션의 락 대기를 잘못 세면 버그가 있어도 통과할 수 있다.
+	private fun updateBlockedBy(holderPid: Int): Boolean =
 		jdbcTemplate.queryForObject(
-			"select count(*) from pg_stat_activity where wait_event_type = 'Lock' and query ilike 'update orders%'",
+			"select count(*) from pg_stat_activity where ? = any(pg_blocking_pids(pid)) and query ilike 'update orders%'",
 			Long::class.java,
+			holderPid,
 		)!! > 0
 }
